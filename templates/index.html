@@ -1914,9 +1914,68 @@ function applyUILang(){
   const s=uiStr[selectedLang]||uiStr['English']||{};
   const l=allLangs.find(x=>x.name===selectedLang)||{code:'en'};
   document.getElementById('langChip').textContent=l.code.toUpperCase();
-  const m={'dashboard':'nt-dash','alerts':'nt-alerts','guidelines':'nt-guide','maps':'nt-maps','live':'navLive','signout':'navSignout','shelter':'nt-shelter'};
-  Object.entries(m).forEach(([k,id])=>{if(s[k]){const e=document.getElementById(id);if(e)e.textContent=s[k];}});
-  const mi=document.getElementById('msgInput');if(mi&&s.askme)mi.placeholder=s.askme;
+
+  // ── Nav labels (desktop + mobile) ──
+  const navMap={
+    'dashboard':['nt-dash','mnt-dash'],
+    'alerts':   ['nt-alerts','mnt-alerts'],
+    'guidelines':['nt-guide','mnt-guide'],
+    'maps':     ['nt-maps','mnt-maps'],
+    'shelter':  ['nt-shelter','mnt-shelter'],
+    'live':     ['navLive'],
+    'signout':  ['navSignout'],
+  };
+  Object.entries(navMap).forEach(([k,ids])=>{
+    if(s[k]) ids.forEach(id=>{const e=document.getElementById(id);if(e)e.textContent=s[k];});
+  });
+
+  // ── Chat input placeholder ──
+  const mi=document.getElementById('msgInput');
+  if(mi&&s.askme) mi.placeholder=s.askme;
+
+  // ── Welcome screen chips ──
+  const wdesc=document.getElementById('welcomeEl');
+  if(wdesc){
+    const wd=wdesc.querySelector('.w-desc');
+    if(wd) wd.textContent=s.askme||'Ask about weather risks, disaster alerts, safety guidelines in your language.';
+  }
+
+  // ── Risk box sub-label (if no active hazards) ──
+  const sqSub=document.getElementById('sqSub');
+  if(sqSub&&sqSub.textContent.trim()==='No active hazards'&&s.noHazards)
+    sqSub.textContent=s.noHazards;
+
+  // ── Risk level label in maps sidebar ──
+  const mapRisk=document.getElementById('mapRisk');
+  if(mapRisk&&mapRisk.textContent==='NORMAL'&&s.riskLevel){}
+  // (mapRisk shows the value, not the label — skip)
+
+  // ── Page section headers that have translatable spans ──
+  // weather section label
+  const wsl=document.querySelector('.ps-l');
+  // (leave section headers as-is — they're icons + English labels, acceptable)
+
+  // ── hint bar below chat ──
+  const hint=document.querySelector('.ihint');
+  if(hint){
+    const hintMap={
+      'Tamil':'Enter அனுப்ப · Shift+Enter புதிய வரி · 🎤 குரல் · 🌐 22 மொழிகள்',
+      'Hindi':'Enter भेजें · Shift+Enter नई लाइन · 🎤 आवाज़ · 🌐 22 भाषाएं',
+      'Telugu':'Enter పంపు · Shift+Enter కొత్త వరుస · 🎤 వాయిస్ · 🌐 22 భాషలు',
+      'Malayalam':'Enter അയക്കാൻ · Shift+Enter പുതിയ വരി · 🎤 ശബ്ദം · 🌐 22 ഭാഷകൾ',
+      'Kannada':'Enter ಕಳುಹಿಸಿ · Shift+Enter ಹೊಸ ಸಾಲು · 🎤 ಧ್ವನಿ · 🌐 22 ಭಾಷೆಗಳು',
+      'Bengali':'Enter পাঠান · Shift+Enter নতুন লাইন · 🎤 ভয়েস · 🌐 22 ভাষা',
+      'Marathi':'Enter पाठवा · Shift+Enter नवीन ओळ · 🎤 आवाज · 🌐 22 भाषा',
+      'Gujarati':'Enter મોકલો · Shift+Enter નવી લાઇન · 🎤 અવાજ · 🌐 22 ભાષાઓ',
+      'Punjabi':'Enter ਭੇਜੋ · Shift+Enter ਨਵੀਂ ਲਾਈਨ · 🎤 ਆਵਾਜ਼ · 🌐 22 ਭਾਸ਼ਾਵਾਂ',
+      'Japanese':'Enter 送信 · Shift+Enter 改行 · 🎤 音声 · 🌐 22言語',
+      'English':'Enter to send · Shift+Enter new line · 🎤 voice · 🌐 22 languages',
+    };
+    hint.textContent=hintMap[selectedLang]||hintMap['English'];
+  }
+
+  // ── document lang attribute (helps browser font rendering for CJK etc.) ──
+  document.documentElement.lang=l.code||'en';
 }
 
 /* ═══ CLOCK ═══ */
@@ -2740,7 +2799,7 @@ const LANG_SPEECH_CODES={
   'English':'en-IN','Tamil':'ta-IN','Hindi':'hi-IN','Telugu':'te-IN',
   'Malayalam':'ml-IN','Kannada':'kn-IN','Bengali':'bn-IN','Marathi':'mr-IN',
   'Gujarati':'gu-IN','Punjabi':'pa-IN','Odia':'or-IN','Assamese':'as-IN',
-  'Urdu':'ur-IN','Sanskrit':'sa-IN','Nepali':'ne-IN',
+  'Urdu':'ur-IN','Sanskrit':'sa-IN','Nepali':'ne-IN','Japanese':'ja-JP',
 };
 
 function startVoice(){

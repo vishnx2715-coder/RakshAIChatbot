@@ -1,5 +1,5 @@
 from flask import Flask, request, jsonify, session
-import requests, os, json, hashlib, secrets, time
+import requests, os, json, hashlib, secrets, time, threading
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -33,8 +33,10 @@ if not _secret:
 app.secret_key = _secret
 
 WEATHER_KEY = os.getenv("WEATHER_API_KEY", "c4299a4cf2c891d96114c83661c34316")
-GROQ_KEY    = os.getenv("GROQ_API_KEY", "YOUR_GROQ_KEY_HERE")
-groq_client = Groq(api_key=GROQ_KEY)
+GROQ_KEY    = os.getenv("GROQ_API_KEY", "")
+if not GROQ_KEY:
+    print("ERROR: GROQ_API_KEY not set — chatbot will return 401 errors. Add it to your Render environment variables.")
+groq_client = Groq(api_key=GROQ_KEY) if GROQ_KEY else None
 MODEL       = "llama-3.3-70b-versatile"
 
 # ─── GOOGLE OAUTH ─────────────────────────────────────────────
@@ -53,11 +55,15 @@ SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
 supabase = None; USE_SUPABASE = False
 if SUPABASE_URL and SUPABASE_KEY and create_client:
-    try:
-        supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-        USE_SUPABASE = True; print("✅ Supabase connected.")
-    except Exception as e:
-        print(f"⚠️  Supabase failed ({e}) — using users.json")
+    if SUPABASE_KEY.startswith("sb_secret_"):
+        print("⚠️  SUPABASE_KEY looks like a Management API key (sb_secret_...). "
+              "Use the project 'anon' or 'service_role' key from Supabase → Settings → API.")
+    else:
+        try:
+            supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+            USE_SUPABASE = True; print("✅ Supabase connected.")
+        except Exception as e:
+            print(f"⚠️  Supabase failed ({e}) — using users.json")
 else:
     print("ℹ️  No Supabase creds — using local users.json")
 
@@ -162,6 +168,7 @@ ALL_LANGUAGES = [
     {"name": "Telugu",    "native": "తెలుగు",       "code": "te", "flag": "🇮🇳"},
     {"name": "Urdu",      "native": "اردو",          "code": "ur", "flag": "🇮🇳"},
     {"name": "English",   "native": "English",      "code": "en", "flag": "🇬🇧"},
+    {"name": "Japanese",  "native": "日本語",         "code": "ja", "flag": "🇯🇵"},
 ]
 
 # ─── UI TRANSLATIONS ──────────────────────────
@@ -177,6 +184,7 @@ UI_STRINGS = {
     "Gujarati":  {"welcome":"આવો","dashboard":"ડેશબોર્ડ","alerts":"ચેતવણી","guidelines":"માર્ગદર્શિકા","maps":"નકશા","signout":"સાઇન આઉટ","askme":"તમારી ભાષામાં પૂછો…","sending":"…","riskLevel":"જોખમ સ્તર","noHazards":"કોઈ સક્રિય જોખમ નથી","loading":"લોડ…","live":"લાઈવ"},
     "Punjabi":   {"welcome":"ਜੀ ਆਇਆਂ","dashboard":"ਡੈਸ਼ਬੋਰਡ","alerts":"ਚੇਤਾਵਨੀਆਂ","guidelines":"ਦਿਸ਼ਾ ਨਿਰਦੇਸ਼","maps":"ਨਕਸ਼ੇ","signout":"ਸਾਈਨ ਆਊਟ","askme":"ਆਪਣੀ ਭਾਸ਼ਾ ਵਿੱਚ ਪੁੱਛੋ…","sending":"…","riskLevel":"ਜੋਖਮ ਪੱਧਰ","noHazards":"ਕੋਈ ਸਰਗਰਮ ਖ਼ਤਰਾ ਨਹੀਂ","loading":"ਲੋਡ ਹੋ ਰਿਹਾ…","live":"ਲਾਈਵ"},
     "Odia":      {"welcome":"ସ୍ୱାଗତ","dashboard":"ଡ୍ୟାଶ୍‌ବୋର୍ଡ","alerts":"ସତର୍କତା","guidelines":"ଦିଗ୍ଦର୍ଶନ","maps":"ମାନଚିତ୍ର","signout":"ସାଇନ ଆଉଟ","askme":"ଆପଣଙ୍କ ଭାଷାରେ ପଚାରନ୍ତୁ…","sending":"…","riskLevel":"ବିପଦ ସ୍ତର","noHazards":"କୌଣସି ସକ୍ରିୟ ବିପଦ ନାହିଁ","loading":"ଲୋଡ ହେଉଛି…","live":"ଲାଇଭ"},
+    "Japanese":  {"welcome":"ようこそ","dashboard":"ダッシュボード","alerts":"警報","guidelines":"ガイドライン","maps":"地図","signout":"サインアウト","shelter":"避難所","askme":"日本語で質問してください…","sending":"…","riskLevel":"危険レベル","noHazards":"活発な危険なし","loading":"読み込み中…","live":"ライブ"},
 }
 
 
@@ -304,9 +312,9 @@ OFFICIAL_RSS = [
 #       once.  Cache is per-process (sufficient for single-worker
 #       Flask; for multi-worker use Redis instead).
 # ═══════════════════════════════════════════════════════════════
-_rss_cache: dict = {"data": None, "ts": 0}
-RSS_TTL_SECONDS = 300   # 5 minutes — tune to taste
-RSS_PER_SOURCE_TIMEOUT = 6  # seconds per individual feed
+_rss_cache: dict = {"data": None, "ts": 0, "refreshing": False}
+RSS_TTL_SECONDS = 300        # 5 minutes
+RSS_PER_SOURCE_TIMEOUT = 4   # reduced: don't wait too long on slow feeds
 
 def _fetch_one_feed(source_url_pair: tuple) -> list:
     """Fetch a single RSS feed and return parsed items."""
@@ -346,34 +354,51 @@ def _fetch_one_feed(source_url_pair: tuple) -> list:
     return items
 
 
+def _do_rss_refresh():
+    """Fetch all feeds in parallel and update cache. Safe to call from a background thread."""
+    global _rss_cache
+    if _rss_cache.get("refreshing"):
+        return  # another thread is already refreshing
+    _rss_cache["refreshing"] = True
+    try:
+        all_items: list = []
+        with ThreadPoolExecutor(max_workers=5) as pool:
+            futures = {pool.submit(_fetch_one_feed, pair): pair for pair in OFFICIAL_RSS}
+            for future in as_completed(futures):
+                try:
+                    all_items.extend(future.result())
+                except Exception:
+                    pass
+        if all_items:
+            _rss_cache["data"] = all_items[:25]
+            _rss_cache["ts"]   = time.monotonic()
+    except Exception:
+        pass
+    finally:
+        _rss_cache["refreshing"] = False
+
+
 def fetch_verified_news() -> list:
     """
-    Fetch from all official RSS feeds IN PARALLEL, with TTL caching.
-    Wall time drops from up to 35s → ~6-7s worst case (single slow feed).
-    Cached result is reused for 5 minutes to avoid hammering external APIs.
+    Return cached RSS data immediately if available (even if stale),
+    trigger a background refresh when TTL expires.
+    First-ever call blocks until we have data (cold start).
     """
     global _rss_cache
-    now = time.monotonic()
-    # Return cached data if still fresh
-    if _rss_cache["data"] is not None and (now - _rss_cache["ts"]) < RSS_TTL_SECONDS:
-        return _rss_cache["data"]
+    now  = time.monotonic()
+    data = _rss_cache["data"]
 
-    all_items: list = []
-    # Fetch all feeds concurrently; max_workers=5 since we have exactly 5 feeds
-    with ThreadPoolExecutor(max_workers=5) as pool:
-        futures = {pool.submit(_fetch_one_feed, pair): pair for pair in OFFICIAL_RSS}
-        for future in as_completed(futures):
-            try:
-                all_items.extend(future.result())
-            except Exception:
-                pass  # individual thread failure is non-fatal
+    if data is None:
+        # Cold start — must block once
+        _do_rss_refresh()
+        return _rss_cache["data"] or []
 
-    # Sort by recency (best-effort on pubDate string) and cap at 25
-    result = all_items[:25]
+    if (now - _rss_cache["ts"]) > RSS_TTL_SECONDS and not _rss_cache.get("refreshing"):
+        # Stale — refresh in background, return old data immediately
+        t = threading.Thread(target=_do_rss_refresh, daemon=True)
+        t.start()
 
-    _rss_cache["data"] = result
-    _rss_cache["ts"]   = now
-    return result
+    return data
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1700,6 +1725,8 @@ def ask_ai(msg, weather=None, risk=None, history=None, username=None, lang="Engl
         system += f"\n\n--- LIVE DATA (use this to answer) ---\n{ctx}\n--- END LIVE DATA ---"
     msgs = list((history or [])[-6:])
     msgs.append({"role": "user", "content": msg})
+    if not groq_client:
+        return "⚠️ AI unavailable: GROQ_API_KEY is not configured. Please add it to your environment variables."
     try:
         r = groq_client.chat.completions.create(
             model=MODEL,
@@ -1710,7 +1737,10 @@ def ask_ai(msg, weather=None, risk=None, history=None, username=None, lang="Engl
         return r.choices[0].message.content
     except Exception as e:
         print(f"[Groq ERROR] {e}")
-        return f"⚠️ AI error: {str(e)}"
+        err_str = str(e)
+        if "401" in err_str or "invalid_api_key" in err_str.lower() or "Invalid API Key" in err_str:
+            return "⚠️ AI error: Invalid Groq API Key. Please update GROQ_API_KEY in your Render environment variables."
+        return f"⚠️ AI error: {err_str}"
 
 
 # ─── AUTH ROUTES ──────────────────────────────────────────────
@@ -1758,7 +1788,10 @@ def google_auth():
           setTimeout(()=>window.close(), 2000);
         </script></body></html>""", 400
     if not GOOGLE_CLIENT_ID:
-        return jsonify({"status": "error", "message": "Google Sign-In is not configured on this server."}), 503
+        return jsonify({
+            "status": "error",
+            "message": "Google Sign-In is not configured. Add GOOGLE_CLIENT_ID to your Render environment variables."
+        }), 503
 
     body = request.get_json(force=True, silent=True) or {}
     credential = body.get("credential", "").strip()
@@ -1793,7 +1826,15 @@ def google_auth():
         except Exception as e:
             return jsonify({"status": "error", "message": f"Could not verify Google token: {e}"}), 500
     except Exception as e:
-        return jsonify({"status": "error", "message": f"Invalid Google token: {e}"}), 401
+        err_msg = str(e)
+        print(f"[google_auth] Token verification error: {err_msg}")
+        if "Token used too late" in err_msg or "expired" in err_msg.lower():
+            return jsonify({"status": "error", "message": "Google token expired. Please try signing in again."}), 401
+        if "audience" in err_msg.lower() or "aud" in err_msg.lower():
+            return jsonify({"status": "error", "message": "Google Client ID mismatch. Check GOOGLE_CLIENT_ID in Render environment variables."}), 401
+        if "origin" in err_msg.lower() or "not allowed" in err_msg.lower():
+            return jsonify({"status": "error", "message": f"Google Sign-In blocked: your deployed domain must be added as an Authorized JavaScript Origin in Google Cloud Console."}), 401
+        return jsonify({"status": "error", "message": f"Invalid Google token: {err_msg}"}), 401
 
     # ── Extract user info from verified token ─────────────────
     email = (id_info.get("email") or "").strip().lower()
@@ -2333,6 +2374,8 @@ def home():
 
 
 if __name__ == "__main__":
+    # Pre-warm RSS cache in background so first user request is instant
+    threading.Thread(target=_do_rss_refresh, daemon=True).start()
     # debug=True enables auto-reload on file save + detailed error pages
     # Set to False in production
     app.run(debug=True, port=5000)
