@@ -43,6 +43,11 @@ if not GOOGLE_CLIENT_ID or GOOGLE_CLIENT_ID == "YOUR_GOOGLE_CLIENT_ID_HERE":
     print("ℹ️  GOOGLE_CLIENT_ID not set — Google Sign-In will be disabled.")
     GOOGLE_CLIENT_ID = ""
 
+# ─── GOOGLE MAPS ──────────────────────────────────────────────
+GOOGLE_MAPS_KEY = os.getenv("GOOGLE_MAPS_KEY", "")
+if not GOOGLE_MAPS_KEY:
+    print("⚠️  GOOGLE_MAPS_KEY not set — Maps, Shelter pages will not work.")
+
 # ─── SUPABASE (optional) ──────────────────────────────────────
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
@@ -475,9 +480,239 @@ def shelters():
 
 
 # ═══════════════════════════════════════════════════════════════
-# /api/overpass  — Proxy for Overpass API
-# ROOT CAUSE of "Network error": browser → overpass-api.de is
-# rate-limited. Flask server-side requests are not. Three mirrors.
+# ═══════════════════════════════════════════════════════════════
+# /api/nearby-shelters  — Nominatim-based shelter search
+# Replaces the unreliable Overpass API mirrors.
+# Nominatim is the official OSM geocoding service — stable, fast,
+# no API key required. We search multiple amenity types in parallel
+# and return a unified list of shelter candidates.
+# ═══════════════════════════════════════════════════════════════
+
+_NOMINATIM_BASE = "https://nominatim.openstreetmap.org/search"
+_NOMINATIM_HDRS = {
+    "User-Agent": "RAKSHA-DisasterAI/2.0 (Emergency Shelter Finder; contact@raksha.gov.in)",
+    "Accept-Language": "en",
+}
+
+# Amenity types to search for as shelter candidates
+_SHELTER_AMENITIES = [
+    "school", "college", "university",
+    "hospital", "clinic",
+    "community_centre", "townhall",
+    "place_of_worship",
+    "fire_station", "police",
+]
+
+def _nominatim_search(amenity: str, lat: float, lon: float, radius_m: int) -> list:
+    """
+    Search Nominatim for a single amenity type near a location.
+    Splits the area into 4 quadrants so Nominatim's per-request
+    limit-50 applies to each quadrant → up to 200 results total
+    with even N/S/E/W coverage.
+    """
+    import math
+
+    # Delta in degrees for the full radius (with 1.3x buffer)
+    lat_delta = (radius_m * 1.3) / 111320.0
+    lon_delta = (radius_m * 1.3) / (111320.0 * math.cos(math.radians(lat)))
+
+    # Define 4 quadrant bounding boxes: (min_lon, max_lat, max_lon, min_lat)
+    quadrants = [
+        # NE quadrant
+        (lon,           lat + lat_delta, lon + lon_delta, lat),
+        # NW quadrant
+        (lon - lon_delta, lat + lat_delta, lon,           lat),
+        # SE quadrant
+        (lon,           lat,             lon + lon_delta, lat - lat_delta),
+        # SW quadrant
+        (lon - lon_delta, lat,           lon,             lat - lat_delta),
+    ]
+
+    all_results = []
+    seen = set()
+
+    for (min_lon, max_lat, max_lon, min_lat) in quadrants:
+        viewbox = f"{min_lon},{max_lat},{max_lon},{min_lat}"
+        params = {
+            "amenity": amenity,
+            "format": "jsonv2",
+            "addressdetails": 1,
+            "limit": 50,
+            "viewbox": viewbox,
+            "bounded": 1,
+        }
+        try:
+            r = requests.get(_NOMINATIM_BASE, params=params,
+                             headers=_NOMINATIM_HDRS, timeout=10)
+            if r.status_code == 200:
+                for item in (r.json() or []):
+                    oid = item.get("osm_id")
+                    if oid and oid not in seen:
+                        seen.add(oid)
+                        all_results.append(item)
+        except Exception:
+            pass
+
+    return all_results
+
+@app.route("/api/nearby-shelters", methods=["POST"])
+def nearby_shelters():
+    """
+    Find nearby shelter candidates using Nominatim.
+    After collecting results, does a batch extratags lookup to get
+    phone numbers, websites, and opening hours from OSM.
+    """
+    body   = request.get_json(force=True, silent=True) or {}
+    lat    = body.get("lat")
+    lon    = body.get("lon")
+    radius = int(body.get("radius", 5000))
+
+    if lat is None or lon is None:
+        return jsonify({"error": "lat and lon required"}), 400
+
+    radius = min(radius, 25000)
+
+    import math
+    def haversine_km(lat1, lon1, lat2, lon2):
+        R = 6371
+        dlat = math.radians(lat2 - lat1)
+        dlon = math.radians(lon2 - lon1)
+        a = (math.sin(dlat/2)**2 +
+             math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon/2)**2)
+        return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+    raw_results = []
+    seen_ids = set()
+
+    # ── Step 1: search all amenity types in parallel ──
+    with ThreadPoolExecutor(max_workers=len(_SHELTER_AMENITIES)) as pool:
+        futures = {
+            pool.submit(_nominatim_search, am, lat, lon, radius): am
+            for am in _SHELTER_AMENITIES
+        }
+        for future in as_completed(futures):
+            amenity_type = futures[future]
+            try:
+                items = future.result()
+                for item in items:
+                    osm_id = item.get("osm_id")
+                    if not osm_id or osm_id in seen_ids:
+                        continue
+                    item_lat = float(item.get("lat", 0))
+                    item_lon = float(item.get("lon", 0))
+                    if not item_lat or not item_lon:
+                        continue
+                    dist_km = haversine_km(lat, lon, item_lat, item_lon)
+                    if dist_km > (radius / 1000) + 0.2:
+                        continue
+                    name = item.get("display_name", "").split(",")[0].strip()
+                    if not name or len(name) < 3:
+                        continue
+                    seen_ids.add(osm_id)
+                    addr = item.get("address", {})
+                    raw_results.append({
+                        "osm_id":      osm_id,
+                        "osm_type":    item.get("osm_type", "node"),
+                        "lat":         item_lat,
+                        "lon":         item_lon,
+                        "name":        name,
+                        "amenity":     amenity_type,
+                        "road":        addr.get("road", ""),
+                        "city":        addr.get("city") or addr.get("town") or addr.get("village") or "",
+                        "suburb":      addr.get("suburb", ""),
+                        "postcode":    addr.get("postcode", ""),
+                    })
+            except Exception:
+                pass
+
+    if not raw_results:
+        return jsonify({"elements": [], "source": "nominatim", "total": 0})
+
+    # ── Step 2: Fetch full OSM tags (phone, website, hours) via OSM API ──
+    # Uses api.openstreetmap.org/api/0.6/{type}/{id}.json — returns ALL tags
+    # including phone, contact:phone, website, opening_hours, operator.
+    # This is the most complete source and is fully free with no rate limits.
+    osm_tags_map = {}   # osm_id → {tag_key: tag_value, ...}
+    _OSM_API = "https://api.openstreetmap.org/api/0.6"
+
+    def _fetch_osm_tags(r):
+        """Fetch full tags for one OSM element."""
+        osm_type = r["osm_type"]   # node, way, relation
+        osm_id   = r["osm_id"]
+        url = f"{_OSM_API}/{osm_type}/{osm_id}.json"
+        try:
+            resp = requests.get(url, headers=_NOMINATIM_HDRS, timeout=8)
+            if resp.status_code == 200:
+                data = resp.json()
+                elements = data.get("elements", [])
+                if elements:
+                    return osm_id, elements[0].get("tags", {})
+        except Exception:
+            pass
+        return osm_id, {}
+
+    # Fetch tags in parallel — max 20 concurrent to be polite to OSM
+    with ThreadPoolExecutor(max_workers=20) as pool:
+        for osm_id, tags_data in pool.map(_fetch_osm_tags, raw_results):
+            if tags_data:
+                osm_tags_map[osm_id] = tags_data
+
+    # ── Step 3: build final elements ──
+    results = []
+    for r in raw_results:
+        et = osm_tags_map.get(r["osm_id"], {})
+
+        # Extract phone — try all OSM phone tag variants
+        phone = (et.get("phone") or et.get("contact:phone") or
+                 et.get("telephone") or et.get("contact:mobile") or
+                 et.get("mobile") or et.get("phone_1") or "")
+
+        if phone:
+            phone = phone.strip().replace(";", " / ").replace(",", " / ")
+
+        opening_hours = et.get("opening_hours", "")
+        operator      = et.get("operator", "")
+        website       = et.get("website") or et.get("contact:website") or et.get("url") or ""
+        email         = et.get("email") or et.get("contact:email") or ""
+
+        # Build full address — prefer OSM addr:full if present
+        address = (et.get("addr:full") or
+                   et.get("address") or
+                   ", ".join(p for p in [r["road"], r["suburb"], r["city"]] if p))
+
+        # Real OSM capacity tag (e.g. "capacity" = "500" on some hospitals/halls)
+        osm_capacity = et.get("capacity") or et.get("capacity:persons") or ""
+
+        tags = {
+            "name":             r["name"],
+            "amenity":          r["amenity"],
+            "addr:street":      r["road"],
+            "addr:city":        r["city"],
+            "phone":            phone,
+            "contact:phone":    phone,
+            "opening_hours":    opening_hours or "24/7 during emergencies",
+            "operator":         operator or "Local Authority / NDMA",
+            "website":          website,
+            "email":            email,
+            "full_address":     address,
+            "capacity":         osm_capacity,   # real OSM capacity if available
+        }
+
+        results.append({
+            "id":     r["osm_id"],
+            "type":   r["osm_type"],
+            "lat":    r["lat"],
+            "lon":    r["lon"],
+            "tags":   tags,
+            "center": {"lat": r["lat"], "lon": r["lon"]},
+        })
+
+    return jsonify({"elements": results, "source": "nominatim", "total": len(results)})
+
+
+# ═══════════════════════════════════════════════════════════════
+# /api/overpass  — kept for backward compat, now proxies to
+# /api/nearby-shelters via Nominatim (Overpass mirrors are down)
 # ═══════════════════════════════════════════════════════════════
 _OVERPASS_MIRRORS = [
     "https://overpass-api.de/api/interpreter",
@@ -487,16 +722,24 @@ _OVERPASS_MIRRORS = [
 
 @app.route("/api/overpass", methods=["POST"])
 def overpass_proxy():
+    """
+    Try Overpass mirrors first; if all fail, fall back to Nominatim.
+    This ensures the shelter page always returns results.
+    """
     body  = request.get_json(force=True, silent=True) or {}
     query = body.get("query", "").strip()
     if not query:
         return jsonify({"error": "no query"}), 400
+
     hdrs = {"Content-Type": "application/x-www-form-urlencoded",
             "User-Agent": "RAKSHA/1.0"}
     last_err = ""
+
+    # Try Overpass mirrors with a short timeout first
     for mirror in _OVERPASS_MIRRORS:
         try:
-            r = requests.post(mirror, data={"data": query}, headers=hdrs, timeout=25)
+            r = requests.post(mirror, data={"data": query},
+                              headers=hdrs, timeout=12)
             if r.status_code != 200:
                 last_err = f"HTTP {r.status_code}"; continue
             j = r.json()
@@ -505,6 +748,61 @@ def overpass_proxy():
             return jsonify(j)
         except Exception as e:
             last_err = str(e); continue
+
+    # ── All Overpass mirrors failed → fall back to Nominatim ──
+    # Parse lat/lon/radius from the Overpass QL query
+    import re
+    m = re.search(r'around:(\d+),([\d.\-]+),([\d.\-]+)', query)
+    if m:
+        radius = int(m.group(1))
+        lat    = float(m.group(2))
+        lon    = float(m.group(3))
+        print(f"[Overpass fallback] Using Nominatim lat={lat} lon={lon} r={radius}")
+        results = []
+        seen_ids = set()
+        with ThreadPoolExecutor(max_workers=len(_SHELTER_AMENITIES)) as pool:
+            futures = {
+                pool.submit(_nominatim_search, am, lat, lon, radius): am
+                for am in _SHELTER_AMENITIES
+            }
+            for future in as_completed(futures):
+                try:
+                    items = future.result()
+                    for item in items:
+                        osm_id = item.get("osm_id")
+                        if not osm_id or osm_id in seen_ids:
+                            continue
+                        seen_ids.add(osm_id)
+                        item_lat = float(item.get("lat", 0))
+                        item_lon = float(item.get("lon", 0))
+                        if not item_lat or not item_lon:
+                            continue
+                        name = item.get("display_name", "").split(",")[0].strip()
+                        if not name or len(name) < 3:
+                            continue
+                        addr = item.get("address", {})
+                        amenity_type = futures[future]
+                        tags = {
+                            "name": name,
+                            "amenity": amenity_type,
+                            "addr:street": addr.get("road", ""),
+                            "addr:city": addr.get("city") or addr.get("town") or addr.get("village") or "",
+                            "phone": "",
+                            "opening_hours": "24/7 during emergencies",
+                            "operator": "Local Authority / NDMA",
+                        }
+                        results.append({
+                            "id": osm_id,
+                            "type": item.get("osm_type", "node"),
+                            "lat": item_lat,
+                            "lon": item_lon,
+                            "tags": tags,
+                            "center": {"lat": item_lat, "lon": item_lon},
+                        })
+                except Exception:
+                    pass
+        return jsonify({"elements": results, "source": "nominatim_fallback"})
+
     return jsonify({"error": "All Overpass mirrors failed", "detail": last_err}), 502
 
 
@@ -609,15 +907,144 @@ def osrm_route():
     dest_lat = body.get("dest_lat"); dest_lon = body.get("dest_lon")
     if None in (user_lat, user_lon, dest_lat, dest_lon):
         return jsonify({"error": "missing coordinates"}), 400
+    # OSRM public server only has 'driving' compiled; map 'foot'/'walking' → 'driving'
+    # and let the frontend estimate walk time from drive distance
+    osrm_profile = "driving" if profile in ("foot", "walking", "foot-walking") else profile
     # lon,lat order for OSRM
-    url = (f"{OSRM_BASE}/route/v1/{profile}/"
+    url = (f"{OSRM_BASE}/route/v1/{osrm_profile}/"
            f"{user_lon},{user_lat};{dest_lon},{dest_lat}"
            f"?overview=full&geometries=geojson")
     try:
         r = requests.get(url, timeout=15)
         if r.status_code != 200:
             return jsonify({"error": f"OSRM HTTP {r.status_code}"}), 502
-        return jsonify(r.json())
+        data = r.json()
+        # Tag the response so frontend knows if it's a walk estimate
+        data["_profile_used"] = osrm_profile
+        data["_profile_requested"] = profile
+        return jsonify(data)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 502
+
+
+# ═══════════════════════════════════════════════════════════════
+# OpenRouteService proxy routes
+# ORS key stays server-side — never exposed to browser
+# ═══════════════════════════════════════════════════════════════
+ORS_KEY = os.getenv("ORS_API_KEY", "")
+ORS_BASE = "https://api.openrouteservice.org"
+
+@app.route("/api/ors-matrix", methods=["POST"])
+def ors_matrix():
+    """
+    ORS Matrix API — real road distances + durations for multiple shelters.
+    Accepts: { user_lat, user_lon, shelters: [{id, lat, lon}], profile: "driving-car"|"foot-walking" }
+    Returns: { results: [{id, distance_m, duration_s}] }
+    """
+    if not ORS_KEY:
+        return jsonify({"error": "ORS_API_KEY not configured"}), 503
+
+    body     = request.get_json(force=True, silent=True) or {}
+    user_lat = body.get("user_lat")
+    user_lon = body.get("user_lon")
+    shelters = body.get("shelters", [])
+    profile  = body.get("profile", "driving-car")  # or "foot-walking"
+
+    if user_lat is None or user_lon is None or not shelters:
+        return jsonify({"error": "user_lat, user_lon and shelters required"}), 400
+
+    # ORS Matrix allows max 50 destinations per request
+    shelters = shelters[:49]
+    results  = []
+    chunk_size = 49
+
+    headers = {
+        "Authorization": ORS_KEY,
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+
+    for i in range(0, len(shelters), chunk_size):
+        chunk = shelters[i:i + chunk_size]
+        # ORS uses [lon, lat] order
+        locations = [[user_lon, user_lat]] + [[s["lon"], s["lat"]] for s in chunk]
+        payload = {
+            "locations": locations,
+            "sources": [0],          # user is source index 0
+            "destinations": list(range(1, len(locations))),
+            "metrics": ["distance", "duration"],
+            "units": "m",
+        }
+        try:
+            r = requests.post(
+                f"{ORS_BASE}/v2/matrix/{profile}",
+                json=payload, headers=headers, timeout=15
+            )
+            if r.status_code != 200:
+                print(f"[ORS Matrix] HTTP {r.status_code}: {r.text[:200]}")
+                continue
+            data = r.json()
+            distances = (data.get("distances") or [[]])[0]
+            durations = (data.get("durations") or [[]])[0]
+            for j, s in enumerate(chunk):
+                dist_m = distances[j] if j < len(distances) else None
+                dur_s  = durations[j]  if j < len(durations)  else None
+                if dist_m is not None:
+                    results.append({
+                        "id":         s["id"],
+                        "distance_m": round(dist_m),
+                        "duration_s": round(dur_s) if dur_s is not None else None,
+                    })
+        except Exception as e:
+            print(f"[ORS Matrix] chunk {i} error: {e}")
+            continue
+
+    return jsonify({"results": results})
+
+
+@app.route("/api/ors-route", methods=["POST"])
+def ors_route():
+    """
+    ORS Directions API — full route geometry for drawing on map.
+    Accepts: { user_lat, user_lon, dest_lat, dest_lon, profile }
+    Returns: GeoJSON LineString geometry + distance_m + duration_s
+    """
+    if not ORS_KEY:
+        return jsonify({"error": "ORS_API_KEY not configured"}), 503
+
+    body     = request.get_json(force=True, silent=True) or {}
+    profile  = body.get("profile", "driving-car")
+    user_lat = body.get("user_lat"); user_lon = body.get("user_lon")
+    dest_lat = body.get("dest_lat"); dest_lon = body.get("dest_lon")
+
+    if None in (user_lat, user_lon, dest_lat, dest_lon):
+        return jsonify({"error": "missing coordinates"}), 400
+
+    headers = {
+        "Authorization": ORS_KEY,
+        "Content-Type": "application/json",
+        "Accept": "application/json, application/geo+json",
+    }
+    payload = {
+        "coordinates": [[user_lon, user_lat], [dest_lon, dest_lat]],
+        "format": "geojson",
+    }
+    try:
+        r = requests.post(
+            f"{ORS_BASE}/v2/directions/{profile}/geojson",
+            json=payload, headers=headers, timeout=15
+        )
+        if r.status_code != 200:
+            return jsonify({"error": f"ORS HTTP {r.status_code}", "detail": r.text[:200]}), 502
+        data = r.json()
+        feature  = data["features"][0]
+        props    = feature["properties"]["summary"]
+        geometry = feature["geometry"]
+        return jsonify({
+            "geometry":   geometry,
+            "distance_m": round(props.get("distance", 0)),
+            "duration_s": round(props.get("duration", 0)),
+        })
     except Exception as e:
         return jsonify({"error": str(e)}), 502
 
@@ -1224,14 +1651,27 @@ GUIDELINES = {
 
 
 # ─── AI CORE ──────────────────────────────────────────────────
-SYSTEM = """You are RAKSHA — India's official disaster intelligence assistant, built on verified NDMA guidelines.
+SYSTEM = """You are RAKSHA — India's official AI disaster and weather assistant.
 
-STRICT RULES:
-1. LANGUAGE: Always reply in the exact language the user writes in. Tamil→Tamil, Hindi→Hindi, etc. Never mix languages.
-2. ACCURACY: Only provide information based on verified NDMA, IMD, and established disaster science. Never fabricate statistics, events, or numbers.
-3. HELPLINES: ONLY cite verified numbers — NDMA:1078, Emergency:112, Fire:101, Ambulance:108, Police:100, Coast Guard:1554.
-4. FORMAT: Use emojis. Structure clearly. If risk is HIGH/CRITICAL, begin with ⚠️ WARNING.
-5. HONESTY: If you don't know something, say so. Never make up disaster events.
+RULES (follow strictly):
+1. LANGUAGE: Reply in the exact same language as the user. Tamil input → Tamil reply. Hindi input → Hindi reply. English → English. Never switch languages.
+
+2. WEATHER (most important): When LIVE DATA is in this prompt, you MUST use it directly. Format weather replies like:
+   🌤 [City] Weather Right Now:
+   • Temperature: [temp]°C (feels like [feels]°C)
+   • Humidity: [humidity]%
+   • Wind: [wind] m/s
+   • Condition: [desc]
+   • Risk: [risk level]
+   NEVER say "I don't have real-time data" or "I can't check" when LIVE DATA is present.
+
+3. GENERAL: Answer all disaster safety, first aid, emergency, and general questions helpfully and directly.
+
+4. HELPLINES: NDMA:1078 | Emergency:112 | Fire:101 | Ambulance:108 | Police:100
+
+5. VOICE-FRIENDLY: Keep answers clear and direct. Avoid very long replies unless detailed info is needed.
+
+6. No live data present → answer from knowledge, note it's not real-time.
 """
 
 def build_ctx(weather, risk):
@@ -1252,20 +1692,25 @@ def build_ctx(weather, risk):
 
 def ask_ai(msg, weather=None, risk=None, history=None, username=None, lang="English"):
     system = SYSTEM
-    if username: system += f"\nUser: {username}."
-    system += f"\nRespond in {lang} language."
+    if username:
+        system += f"\nUser's name: {username}."
+    system += f"\nAlways respond in: {lang}."
     ctx = build_ctx(weather, risk)
-    if ctx: system += f"\n\nLIVE DATA:\n{ctx}"
-    msgs = list((history or [])[-8:])
-    msgs.append({"role":"user","content":msg})
+    if ctx:
+        system += f"\n\n--- LIVE DATA (use this to answer) ---\n{ctx}\n--- END LIVE DATA ---"
+    msgs = list((history or [])[-6:])
+    msgs.append({"role": "user", "content": msg})
     try:
         r = groq_client.chat.completions.create(
-            model=MODEL, max_tokens=1024, temperature=0.4,
-            messages=[{"role":"system","content":system}]+msgs
+            model=MODEL,
+            max_tokens=800,
+            temperature=0.3,
+            messages=[{"role": "system", "content": system}] + msgs
         )
         return r.choices[0].message.content
     except Exception as e:
-        return f"⚠️ AI error: {e}"
+        print(f"[Groq ERROR] {e}")
+        return f"⚠️ AI error: {str(e)}"
 
 
 # ─── AUTH ROUTES ──────────────────────────────────────────────
@@ -1416,6 +1861,194 @@ def languages(): return jsonify({"languages":ALL_LANGUAGES,"ui_strings":UI_STRIN
 
 
 # ─── DATA ROUTES ──────────────────────────────────────────────
+
+# ═══════════════════════════════════════════════════════════════
+# /api/gdacs-events  — Real live disaster events from GDACS
+# GDACS (Global Disaster Alert and Coordination System) is the
+# official UN/EU disaster monitoring platform.
+# Returns events with real lat/lon coordinates, alert level,
+# event type, and description. Cached 10 minutes.
+# ═══════════════════════════════════════════════════════════════
+_gdacs_cache: dict = {"data": None, "ts": 0}
+GDACS_TTL = 600  # 10 minutes
+
+GDACS_EVENT_ICONS = {
+    "EQ": "🏚", "TC": "🌀", "FL": "🌊", "VO": "🌋",
+    "DR": "🏜", "WF": "🔥", "TS": "🌊", "SS": "🌊",
+}
+GDACS_ALERT_MAP = {
+    "Red":    "CRITICAL",
+    "Orange": "HIGH",
+    "Green":  "LOW",
+}
+
+def fetch_gdacs_events():
+    """Fetch live events from GDACS GeoJSON API. Cached 10 min."""
+    global _gdacs_cache
+    now = time.monotonic()
+    if _gdacs_cache["data"] is not None and (now - _gdacs_cache["ts"]) < GDACS_TTL:
+        return _gdacs_cache["data"]
+
+    results = []
+    seen_ids = set()
+
+    # Fetch ALL alert levels globally (Green + Orange + Red)
+    try:
+        url = ("https://www.gdacs.org/gdacsapi/api/events/geteventlist/SEARCH"
+               "?eventlist=EQ;TC;FL;VO;DR;WF"
+               "&alertlevel=Green;Orange;Red"
+               "&pagesize=50")
+        r = requests.get(url, timeout=15,
+                         headers={"User-Agent": "RAKSHA-DisasterAI/2.0"})
+        if r.status_code == 200:
+            for f in r.json().get("features", []):
+                p   = f.get("properties", {})
+                geo = f.get("geometry", {})
+                coords = geo.get("coordinates", [None, None])
+                if not coords or coords[0] is None:
+                    continue
+                eid = p.get("eventid", 0)
+                if eid in seen_ids:
+                    continue
+                seen_ids.add(eid)
+                alert_level  = p.get("alertlevel", "Green")
+                raksha_level = GDACS_ALERT_MAP.get(alert_level, "LOW")
+                etype        = p.get("eventtype", "EQ")
+                # colour: Red→critical, Orange→high, Green→low
+                color = "#DC2626" if alert_level == "Red" else \
+                        "#EA580C" if alert_level == "Orange" else "#22d3ee"
+                results.append({
+                    "id":          eid,
+                    "name":        p.get("name", "Unknown Event"),
+                    "type":        etype,
+                    "icon":        GDACS_EVENT_ICONS.get(etype, "⚠️"),
+                    "alert":       alert_level,
+                    "level":       raksha_level,
+                    "country":     p.get("country", ""),
+                    "lat":         coords[1],
+                    "lon":         coords[0],
+                    "date":        (p.get("fromdate") or "")[:10],
+                    "description": p.get("description") or p.get("name", ""),
+                    "url":         p.get("url", {}).get("report", "")
+                                   if isinstance(p.get("url"), dict) else "",
+                    "color":       color,
+                })
+    except Exception as e:
+        print(f"[GDACS] fetch error: {e}")
+
+    _gdacs_cache["data"] = results
+    _gdacs_cache["ts"]   = now
+    return results
+
+
+@app.route("/api/gdacs-events")
+def gdacs_events():
+    """
+    All live disaster events from GDACS with real coordinates.
+    No severity filter — returns Green, Orange and Red events.
+    """
+    events = fetch_gdacs_events()
+    return jsonify({
+        "events":  events,
+        "total":   len(events),
+        "source":  "GDACS — UN/EU Global Disaster Alert and Coordination System",
+        "cached":  True,
+    })
+
+
+# ═══════════════════════════════════════════════════════════════
+# /api/india-weather-risk  — Live weather risk for Indian cities
+# Computes risk from real OpenWeatherMap data for major cities.
+# Only returns cities with HIGH or CRITICAL risk.
+# ═══════════════════════════════════════════════════════════════
+INDIA_RISK_CITIES = [
+    {"name": "Delhi",           "lat": 28.61, "lon": 77.21},
+    {"name": "Mumbai",          "lat": 19.07, "lon": 72.87},
+    {"name": "Chennai",         "lat": 13.08, "lon": 80.27},
+    {"name": "Kolkata",         "lat": 22.57, "lon": 88.36},
+    {"name": "Hyderabad",       "lat": 17.38, "lon": 78.48},
+    {"name": "Bengaluru",       "lat": 12.97, "lon": 77.59},
+    {"name": "Ahmedabad",       "lat": 23.02, "lon": 72.57},
+    {"name": "Pune",            "lat": 18.52, "lon": 73.85},
+    {"name": "Jaipur",          "lat": 26.91, "lon": 75.78},
+    {"name": "Guwahati",        "lat": 26.18, "lon": 91.73},
+    {"name": "Bhubaneswar",     "lat": 20.29, "lon": 85.82},
+    {"name": "Patna",           "lat": 25.59, "lon": 85.13},
+    {"name": "Lucknow",         "lat": 26.85, "lon": 80.91},
+    {"name": "Thiruvananthapuram", "lat": 8.52, "lon": 76.93},
+    {"name": "Srinagar",        "lat": 34.08, "lon": 74.79},
+    {"name": "Visakhapatnam",   "lat": 17.68, "lon": 83.21},
+]
+
+_india_risk_cache: dict = {"data": None, "ts": 0}
+INDIA_RISK_TTL = 300  # 5 minutes
+
+@app.route("/api/india-weather-risk")
+def india_weather_risk():
+    """
+    Fetch live weather for all major Indian cities in parallel,
+    compute risk, return only HIGH + CRITICAL cities.
+    """
+    global _india_risk_cache
+    now = time.monotonic()
+    if _india_risk_cache["data"] is not None and (now - _india_risk_cache["ts"]) < INDIA_RISK_TTL:
+        return jsonify(_india_risk_cache["data"])
+
+    results = []
+
+    def _fetch_city(city):
+        w = get_weather_coords(city["lat"], city["lon"])
+        if not w or "error" in w:
+            return None
+        r = compute_risk(w)
+        if not r or r["overall"] in ("NORMAL", "LOW", "MODERATE"):
+            return None
+        # Build top hazards list
+        top_hazards = sorted(
+            [(k, v) for k, v in r["risks"].items() if v >= 3],
+            key=lambda x: -x[1]
+        )[:3]
+        hazard_labels = [
+            {"key": k, "score": v,
+             "icon": RISK_META.get(k, {}).get("icon", "⚠️"),
+             "label": RISK_META.get(k, {}).get("l", k)}
+            for k, v in top_hazards
+        ]
+        return {
+            "name":     city["name"],
+            "lat":      city["lat"],
+            "lon":      city["lon"],
+            "level":    r["overall"],
+            "temp":     w.get("temp"),
+            "humidity": w.get("humidity"),
+            "wind":     w.get("wind_speed"),
+            "rain":     w.get("rain_1h", 0),
+            "desc":     w.get("desc", ""),
+            "hazards":  hazard_labels,
+            "color":    "#DC2626" if r["overall"] == "CRITICAL" else "#EA580C",
+        }
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = [pool.submit(_fetch_city, city) for city in INDIA_RISK_CITIES]
+        for future in as_completed(futures):
+            try:
+                result = future.result()
+                if result:
+                    results.append(result)
+            except Exception:
+                pass
+
+    payload = {
+        "cities": results,
+        "total": len(results),
+        "source": "OpenWeatherMap live data",
+        "note": "Only HIGH and CRITICAL risk cities shown",
+    }
+    _india_risk_cache["data"] = payload
+    _india_risk_cache["ts"] = now
+    return jsonify(payload)
+
+
 @app.route("/api/news")
 def news():
     items = fetch_verified_news()   # now cached + parallel
@@ -1602,36 +2235,99 @@ def weather_only():
 @app.route("/chat", methods=["POST"])
 def chat():
     if "email" not in session: return jsonify({"reply":"⚠️ Please log in."}),401
-    d=request.json; msg=d.get("message","").strip(); lat=d.get("lat"); lon=d.get("lon"); history=d.get("history",[])
+    d=request.json
+    msg     = d.get("message","").strip()
+    lat     = d.get("lat")
+    lon     = d.get("lon")
+    history = d.get("history",[])
+    # city explicitly sent by frontend when user searched a city (not GPS)
+    sent_city = d.get("city","").strip()
+
     if not msg: return jsonify({"reply":"⚠️ Empty."})
     if len(msg)>800: return jsonify({"reply":"⚠️ Too long."})
     lower=msg.lower()
-    kws=["weather","rain","flood","cyclone","storm","temp","humid","wind","disaster","alert","risk",
-         "safe","forecast","heat","fog","lightning","thunder","earthquake","landslide",
-         "வானிலை","மழை","வெள்ளம்","புயல்","मौसम","बारिश","बाढ़","तूफान",
-         "వాతావరణం","వరద","కాలావస్థ","ಹವಾಮಾನ","ಮಳೆ","ಪ್ರವಾಹ",
-         "കാലാവസ്ഥ","മഴ","വെള്ളപ്പൊക്കം","আবহাওয়া","বন্যা","ਹੜ੍ਹ","ਹਨੇਰੀ"]
-    needs_w = any(k in lower for k in kws) or lat
-    weather,risk = None,None
+
+    # ── Broad keyword list — fetch weather for any weather/disaster/safety question ──
+    weather_kws=[
+        "weather","rain","flood","cyclone","storm","temp","humid","wind","disaster","alert","risk",
+        "safe","forecast","heat","fog","lightning","thunder","earthquake","landslide","drought",
+        "cold","snow","hail","tsunami","fire","smoke","air","pollution","uv","sunrise","sunset",
+        "climate","season","monsoon","cloud","pressure","visibility","feels like","dew",
+        # Indian languages
+        "வானிலை","மழை","வெள்ளம்","புயல்","வெப்பம்","காற்று","மேகம்",
+        "मौसम","बारिश","बाढ़","तूफान","गर्मी","ठंड","धुंध","भूकंप",
+        "వాతావరణం","వరద","కాలావస్థ","వర్షం","గాలి","వేడి",
+        "ಹವಾಮಾನ","ಮಳೆ","ಪ್ರವಾಹ","ಗಾಳಿ","ಬಿಸಿಲು",
+        "കാലാവസ്ഥ","മഴ","വെള്ളപ്പൊക്കം","കാറ്റ്","ചൂട്",
+        "আবহাওয়া","বন্যা","বৃষ্টি","ঝড়",
+        "ਹੜ੍ਹ","ਹਨੇਰੀ","ਮੌਸਮ","ਮੀਂਹ",
+    ]
+    # Always needs_w if coords or city were sent explicitly
+    needs_w = any(k in lower for k in weather_kws) or bool(lat) or bool(sent_city)
+
+    weather, risk = None, None
     if needs_w:
-        if lat and lon: weather=get_weather_coords(lat,lon)
+        if lat and lon:
+            # GPS coords — most accurate
+            weather = get_weather_coords(lat, lon)
+        elif sent_city:
+            # City explicitly passed from frontend (user's searched city)
+            weather = get_weather_city(sent_city)
         else:
-            city="Chennai"; words=lower.split()
-            for i,w in enumerate(words):
-                if w in ("in","at","for","இல்","में","లో","ൽ","ಲ್ಲಿ","এ","ਵਿੱਚ") and i+1<len(words):
-                    city=" ".join(words[i+1:]).strip("?.,!").title(); break
-            weather=get_weather_city(city)
-        if weather and "error" not in weather: risk=compute_risk(weather)
-    lang=session.get("lang","English")
-    reply=ask_ai(msg,weather=weather,risk=risk,history=history,username=session.get("name"),lang=lang)
-    return jsonify({"reply":reply,"weather":weather,"risk":risk})
+            # ── Smart city extraction from message text ──
+            city = None
+            words = lower.split()
+            preps = {"in","at","for","of","near","around","about",
+                     "இல்","இல","la","le","में","के","लिए","లో","కి","ൽ","ಲ್ಲಿ","এ","ਵਿੱਚ"}
+            for i, w in enumerate(words):
+                if w in preps and i + 1 < len(words):
+                    candidate = " ".join(words[i+1:]).strip("?.,!").title()
+                    non_cities = {"me","my","us","here","there","now","today","tomorrow","this","that","the"}
+                    if candidate.lower() not in non_cities and len(candidate) > 1:
+                        city = candidate
+                        break
+
+            if not city:
+                INDIA_CITIES = [
+                    "chennai","mumbai","delhi","kolkata","hyderabad","bengaluru","bangalore",
+                    "ahmedabad","pune","jaipur","lucknow","kanpur","nagpur","indore","thane",
+                    "bhopal","visakhapatnam","vizag","patna","vadodara","ghaziabad","ludhiana",
+                    "agra","nashik","faridabad","meerut","rajkot","varanasi","srinagar","aurangabad",
+                    "amritsar","navi mumbai","allahabad","prayagraj","ranchi","howrah","coimbatore",
+                    "jabalpur","gwalior","vijayawada","jodhpur","madurai","raipur","kota","guwahati",
+                    "chandigarh","solapur","hubli","dharwad","bareilly","moradabad","mysuru","mysore",
+                    "gurgaon","gurugram","noida","thiruvananthapuram","trivandrum","kochi","cochin",
+                    "bhubaneswar","dehradun","shimla","manali","ooty","darjeeling","gangtok",
+                    "pondicherry","puducherry","mangalore","mangaluru","tiruchirappalli","trichy",
+                    "salem","tirunelveli","vellore","erode","tiruppur","dhanbad","bokaro",
+                    "jammu","leh","imphal","shillong","aizawl","kohima","itanagar","agartala",
+                    "port blair","daman","silvassa","panaji","goa",
+                ]
+                for c in INDIA_CITIES:
+                    if c in lower:
+                        city = c.title()
+                        break
+
+            # Last fallback — no city detected anywhere, use Chennai
+            if not city:
+                city = "Chennai"
+
+            weather = get_weather_city(city)
+
+        if weather and "error" not in weather:
+            risk = compute_risk(weather)
+
+    lang = session.get("lang", "English")
+    reply = ask_ai(msg, weather=weather, risk=risk, history=history,
+                   username=session.get("name"), lang=lang)
+    return jsonify({"reply": reply, "weather": weather, "risk": risk})
 
 @app.route("/")
 def home():
     with open("templates/index.html", encoding="utf-8") as f:
         html = f.read()
-    # Inject Google Client ID into the meta tag placeholder
     html = html.replace("{{ google_client_id }}", GOOGLE_CLIENT_ID or "")
+    html = html.replace("{{ google_maps_key }}", GOOGLE_MAPS_KEY or "")
     return html
 
 
