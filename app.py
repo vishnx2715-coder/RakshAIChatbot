@@ -1715,11 +1715,13 @@ def build_ctx(weather, risk):
             parts.append(f"NDMA RISK ({risk['overall']}): " + " | ".join(f"{k}={v}/5" for k,v in a.items()))
     return "\n".join(parts)
 
-def ask_ai(msg, weather=None, risk=None, history=None, username=None, lang="English"):
+def ask_ai(msg, weather=None, risk=None, history=None, username=None, lang="English", voice=False):
     system = SYSTEM
     if username:
         system += f"\nUser's name: {username}."
     system += f"\nAlways respond in: {lang}."
+    if voice:
+        system += "\nVOICE MODE: Reply in maximum 2-3 short sentences. No bullet points, no markdown, no symbols. Speak naturally."
     ctx = build_ctx(weather, risk)
     if ctx:
         system += f"\n\n--- LIVE DATA (use this to answer) ---\n{ctx}\n--- END LIVE DATA ---"
@@ -1730,8 +1732,8 @@ def ask_ai(msg, weather=None, risk=None, history=None, username=None, lang="Engl
     try:
         r = groq_client.chat.completions.create(
             model=MODEL,
-            max_tokens=800,
-            temperature=0.3,
+            max_tokens=180 if voice else 800,  # much shorter = much faster for voice
+            temperature=0.2,
             messages=[{"role": "system", "content": system}] + msgs
         )
         return r.choices[0].message.content
@@ -2359,13 +2361,14 @@ def chat():
             risk = compute_risk(weather)
 
     lang = d.get("lang") or session.get("lang", "English")
+    voice = bool(d.get("voice", False))
     # If frontend detected a different language, update the session too
     if d.get("lang") and d.get("lang") != session.get("lang"):
         session["lang"] = d.get("lang")
         if "email" in session:
             db_update_lang(session["email"], d.get("lang"))
     reply = ask_ai(msg, weather=weather, risk=risk, history=history,
-                   username=session.get("name"), lang=lang)
+                   username=session.get("name"), lang=lang, voice=voice)
     return jsonify({"reply": reply, "weather": weather, "risk": risk})
 
 @app.route("/")

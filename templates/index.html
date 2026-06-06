@@ -2792,7 +2792,7 @@ async function sendMessage(){
     fetch('/api/set-lang',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({lang:selectedLang})}).catch(()=>{});
   }
 
-  const body={message:text,history:chatHistory.slice(-8),lang:selectedLang};
+  const body={message:text,history:chatHistory.slice(-8),lang:selectedLang,voice:_voiceMode};
   if(userLat){body.lat=userLat;body.lon=userLon;}
   else if(currentWeather&&currentWeather.city){
     body.city=currentWeather.city;
@@ -2883,7 +2883,7 @@ function speakReply(text){
   utt.onend=utt.onerror=()=>{
     const btn=document.getElementById('voiceBtn');
     if(btn){btn.textContent='🎤';btn.style.color='';}
-    if(_voiceMode)setTimeout(()=>startVoice(),600);// auto-listen after speaking
+    if(_voiceMode)setTimeout(()=>startVoice(),150);// short gap so mic releases cleanly
   };
   window.speechSynthesis.speak(utt);
 }
@@ -2937,15 +2937,11 @@ function startVoice(){
     // Show interim in input so user sees real-time transcription
     inp.value=finalTranscript||interim;
     autoResize(inp);
-    // Debounce: send after 800ms silence if we have a final result
+    // Stop immediately on final result — no debounce delay
     if(finalTranscript){
       clearTimeout(interimTimeout);
-      interimTimeout=setTimeout(()=>{
-        if(finalTranscript.trim()){
-          inp.value=finalTranscript.trim();
-          rec.stop();
-        }
-      },300);
+      inp.value=finalTranscript.trim();
+      rec.stop(); // triggers onend immediately
     }
   };
 
@@ -2956,7 +2952,7 @@ function startVoice(){
     inp.placeholder='Ask me anything in your language…';
     const txt=inp.value.trim();
     if(txt){
-      setTimeout(()=>sendMessage(),200);
+      sendMessage(); // immediate — no setTimeout
     }else if(!_voiceMode){
       showToast('No speech detected. Tap 🎤 to try again.','info',2500);
     }
