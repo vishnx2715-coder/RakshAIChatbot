@@ -3022,17 +3022,28 @@ function activateVoiceCommand(){
 }
 
 function _startCmdRec(){
+  // Two-pass multilingual recording:
+  // Pass 1: record with en-IN to get a rough transcript and detect language
+  // Pass 2: if a non-English language is detected, re-record with that language's code
+  //         so the browser transcribes in the correct script (ta-IN → Tamil script)
+  _runRecPass('en-IN', true);
+}
+
+function _runRecPass(langCode, isFirstPass){
   const Rec=window.SpeechRecognition||window.webkitSpeechRecognition;
   if(!Rec){_cmdActive=false;return;}
   const inp=document.getElementById('msgInput');
-  if(inp)inp.placeholder='🎤 Listening… speak in any language';
-  _setBtn('listen');
+
+  if(isFirstPass){
+    if(inp)inp.placeholder='🎤 Listening… (speak in any language)';
+    _setBtn('listen');
+  }else{
+    if(inp)inp.placeholder='🎤 Re-capturing in your language…';
+  }
 
   try{
     _cmdRec=new Rec();
-    // Use the user's current selected language for best transcription accuracy
-    // This ensures Tamil users get Tamil script output, not romanized text
-    _cmdRec.lang=LANG_SPEECH_CODES[selectedLang]||'en-IN';
+    _cmdRec.lang=langCode;
     _cmdRec.continuous=false;
     _cmdRec.interimResults=true;
     _cmdRec.maxAlternatives=5;
@@ -3040,11 +3051,9 @@ function _startCmdRec(){
     let finalTxt='', gotResult=false;
 
     _cmdRec.onresult=function(e){
-      let interim='';
-      finalTxt='';
+      let interim='';finalTxt='';
       for(let i=e.resultIndex;i<e.results.length;i++){
         if(e.results[i].isFinal){
-          // Pick best confidence alternative
           let best=e.results[i][0];
           for(let j=1;j<e.results[i].length;j++){
             if(e.results[i][j].confidence>best.confidence)best=e.results[i][j];
@@ -3060,25 +3069,58 @@ function _startCmdRec(){
     };
 
     _cmdRec.onend=function(){
-      _cmdRec=null; _cmdActive=false;
+      _cmdRec=null;
       if(inp)inp.placeholder='Ask me anything in your language…';
-      _setBtn('idle');
-      const txt=(inp?inp.value:'').trim();
-      if(txt&&gotResult){
-        // Detect language from transcribed text
-        const detected=detectLangFromText(txt);
-        if(detected&&detected!==selectedLang){
-          selectedLang=detected;
-          applyUILang();
-          loadVoices(detected);
-          fetch('/api/set-lang',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({lang:selectedLang})}).catch(()=>{});
+
+      if(!gotResult||!finalTxt.trim()){
+        // Nothing heard
+        _cmdActive=false;
+        _setBtn('idle');
+        if(!isFirstPass){
+          // Both passes failed — give up
+          speakShort('I could not hear you. Say Raksha to try again.',()=>{
+            _wakeTimer=setTimeout(()=>startWakeWordListening(),500);
+          });
+        }else{
+          // First pass failed — still retry once with user's selected lang
+          const fallbackCode=LANG_SPEECH_CODES[selectedLang]||'en-IN';
+          if(fallbackCode!=='en-IN'){
+            _cmdActive=true;
+            setTimeout(()=>_runRecPass(fallbackCode,false),300);
+          }else{
+            speakShort('I could not hear you. Say Raksha to try again.',()=>{
+              _wakeTimer=setTimeout(()=>startWakeWordListening(),500);
+            });
+          }
         }
-        _voiceMode=true;
-        sendMessage();
+        return;
+      }
+
+      if(isFirstPass){
+        // ── Language detection from rough transcript ──
+        const detectedLang=_detectLangForVoice(finalTxt);
+        const detectedCode=LANG_SPEECH_CODES[detectedLang]||'en-IN';
+
+        if(detectedLang!=='English'&&detectedCode!=='en-IN'&&detectedCode!==langCode){
+          // Non-English detected — switch language and re-record for proper script
+          if(detectedLang!==selectedLang){
+            selectedLang=detectedLang;
+            applyUILang();
+            loadVoices(detectedLang);
+            fetch('/api/set-lang',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({lang:selectedLang})}).catch(()=>{});
+            showToast(`Switched to ${detectedLang} 🎤`,'info',1500);
+          }
+          // Re-record with the correct language code
+          _cmdActive=true;
+          setTimeout(()=>_runRecPass(detectedCode,false),400);
+          return;
+        }
+        // English detected or same language — use this transcript directly
+        _finishVoiceCapture(finalTxt,detectedLang);
       }else{
-        speakShort('I did not catch that. Say Raksha to try again.',()=>{
-          _wakeTimer=setTimeout(()=>startWakeWordListening(),500);
-        });
+        // Second pass — use this properly-scripted transcript
+        const detectedLang=_detectLangForVoice(finalTxt)||selectedLang;
+        _finishVoiceCapture(finalTxt,detectedLang);
       }
     };
 
@@ -3086,7 +3128,7 @@ function _startCmdRec(){
       _cmdRec=null; _cmdActive=false;
       if(inp)inp.placeholder='Ask me anything in your language…';
       _setBtn('idle');
-      if(e.error==='not-allowed'||e.error==='audio-capture'){return;}
+      if(e.error==='not-allowed'||e.error==='audio-capture')return;
       if(e.error!=='aborted'){_wakeTimer=setTimeout(()=>startWakeWordListening(),2000);}
     };
 
@@ -3095,6 +3137,48 @@ function _startCmdRec(){
     _cmdActive=false;
     _wakeTimer=setTimeout(()=>startWakeWordListening(),2000);
   }
+}
+
+// Detect language from voice transcript (handles romanized forms too)
+function _detectLangForVoice(text){
+  // 1. Try Unicode script detection first
+  const scriptResult=detectLangFromText(text);
+  if(scriptResult)return scriptResult;
+
+  // 2. Romanized language detection via keyword matching
+  const t=text.toLowerCase().trim();
+  const langKeywords={
+    'Tamil':   ['enna','vanakam','epdi','sollu','naan','naam','unga','antha','inga','yellam','paaru','kettu','vellam','mazhai','puyal','seri','aama','illa','theriyum','romba','konjam','thamizh','en na','kathal','venum','venda','nalla','ketkiren'],
+    'Hindi':   ['kya','mujhe','aapko','batao','abhi','yahan','wahan','theek','accha','nahi','haan','kar','hai','hain','mere','kaise','kab','kahan','kyun','karo','raha','bhi','toh','par','lekin'],
+    'Telugu':  ['emi','ela','ikkade','akkade','nenu','meeru','cheppandi','vellam','vaana','pedda','chinna','manchi','kaadu','avunu'],
+    'Malayalam':['enthu','etha','ingane','angane','varu','poku','njan','ningal','avar','ella','parayoo','cheyyo'],
+    'Kannada': ['enu','hege','illi','alli','nanu','neevu','avaru','ella','heli','maadi','agi','illa'],
+    'Bengali': ['ki','kothay','kemon','ami','tumi','apni','hyan','na','bhalo','koro','jao','eso'],
+    'Gujarati':['shu','kyare','tame','ame','haan','na','saaru','karo','jao','avo'],
+  };
+  let bestLang='English', bestCount=0;
+  for(const [lang,words] of Object.entries(langKeywords)){
+    const count=words.filter(w=>t.includes(w)).length;
+    if(count>bestCount&&count>=2){bestCount=count;bestLang=lang;}
+  }
+  return bestLang;
+}
+
+function _finishVoiceCapture(txt, detectedLang){
+  _cmdActive=false;
+  _setBtn('idle');
+  const inp=document.getElementById('msgInput');
+  if(inp){inp.value=txt;autoResize(inp);}
+
+  // Update language if different
+  if(detectedLang&&detectedLang!=='English'&&detectedLang!==selectedLang){
+    selectedLang=detectedLang;
+    applyUILang();
+    loadVoices(detectedLang);
+    fetch('/api/set-lang',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({lang:selectedLang})}).catch(()=>{});
+  }
+  _voiceMode=true;
+  sendMessage();
 }
 
 /* ════════════════════════════════════════════════
