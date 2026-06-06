@@ -31,7 +31,6 @@
 }
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 html,body{height:100%;font-family:var(--sans);overflow:hidden}
-
 /* ── ANIMATIONS ── */
 @keyframes cardIn{from{opacity:0;transform:translateY(20px) scale(.97)}to{opacity:1;transform:translateY(0) scale(1)}}
 @keyframes fadeUp{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
@@ -2024,12 +2023,10 @@ function goPage(id){
     if(!shelterMapInstance){initShelterMap();}
     else{setTimeout(()=>{if(shelterMapInstance){shelterMapInstance.invalidateSize(true);}},350);}
   }
-  // Scroll to top — works for both body scroll and #app scroll
-  window.scrollTo({top:0,behavior:'instant'});
+  // Scroll to top of page content — covers all browsers
+  try{window.scrollTo({top:0,behavior:'instant'});}catch(e){window.scrollTo(0,0);}
   document.documentElement.scrollTop=0;
   document.body.scrollTop=0;
-  const app=document.getElementById('app');
-  if(app)app.scrollTop=0;
 }
 
 /* ═══ SCROLL REVEAL ═══ */
