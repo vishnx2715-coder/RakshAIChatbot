@@ -1470,7 +1470,7 @@ const CITY_STATIONS=[
   {lat:33.72,lon:73.06,name:"Islamabad"},{lat:6.93,lon:79.85,name:"Colombo"},
 ];
 
-let chatHistory=[],userLat=null,userLon=null,loading=false,isRec=false;
+let chatHistory=[],userLat=null,userLon=null,loading=false;
 let selectedLang="English",allLangs=[],uiStr={};
 let currentWeather=null,currentForecast=[];
 let mapInstance=null,baseLayer=null,overlayLayers=[],userMarkerRef=null,zoneMarkers=[];
@@ -1663,9 +1663,14 @@ function enterApp(name,showLang){
 function appInit(){
   useMyLocation();loadNews();loadAlerts();
   loadGuide('flood',document.querySelector('.gnbtn'));
-  // Do NOT init map here — Maps page is hidden on load.
-  // initMap() is called lazily when user clicks the Maps tab (goPage).
   startClock();initScrollReveal();
+  // Start always-on wake word listener ("Raksha")
+  if(window.SpeechRecognition||window.webkitSpeechRecognition){
+    setTimeout(()=>{
+      startWakeWordListening();
+      showToast('🎤 Say "Raksha" to activate voice assistant','info',3500);
+    },2000);
+  }
 }
 async function checkSession(){
   try{const r=await fetch('/api/me');const d=await r.json();if(d.logged_in){selectedLang=d.lang||'English';enterApp(d.name,false);}}catch(e){}
@@ -2844,147 +2849,290 @@ function detectLangFromText(text){
   return null;
 }
 
-/* ═══ VOICE ASSISTANT ═══ */
+/* ═══ VOICE ASSISTANT — Always-on "Raksha" wake word ═══ */
 const LANG_SPEECH_CODES={
   'English':'en-IN','Tamil':'ta-IN','Hindi':'hi-IN','Telugu':'te-IN',
   'Malayalam':'ml-IN','Kannada':'kn-IN','Bengali':'bn-IN','Marathi':'mr-IN',
   'Gujarati':'gu-IN','Punjabi':'pa-IN','Odia':'or-IN','Assamese':'as-IN',
   'Urdu':'ur-IN','Sanskrit':'sa-IN','Nepali':'ne-IN','Japanese':'ja-JP',
-  'Bengali':'bn-IN','Bodo':'en-IN','Dogri':'hi-IN','Kashmiri':'ur-IN',
-  'Konkani':'en-IN','Maithili':'hi-IN','Manipuri':'en-IN','Santali':'en-IN',
-  'Sindhi':'ur-IN',
+  'Bodo':'en-IN','Dogri':'hi-IN','Kashmiri':'ur-IN','Konkani':'en-IN',
+  'Maithili':'hi-IN','Manipuri':'en-IN','Santali':'en-IN','Sindhi':'ur-IN',
 };
 
-let _voiceMode=false;     // true = voice assistant mode (speak replies)
-let _ttsQueue=[];         // pending speech queue
-let _ttsSpeaking=false;
+// Wake words in multiple languages
+const WAKE_WORDS=['raksha','राक्षा','রক্ষা','రక్ష','ರಕ್ಷ','രക്ഷ','ராட்ஷா','رکشا'];
 
+let _voiceMode=false;       // user-toggled voice reply mode
+let _wakeListening=false;   // background wake-word listener running
+let _activeListening=false; // currently taking a command
+let _wakeRec=null;          // wake word SpeechRecognition instance
+let _cmdRec=null;           // command SpeechRecognition instance
+let _voicesLoaded=false;
+let _preferredVoice=null;
+
+/* ── Load and pick the most human-sounding voice ── */
+function loadVoices(){
+  const voices=window.speechSynthesis.getVoices();
+  if(!voices.length)return;
+  _voicesLoaded=true;
+  const lang=LANG_SPEECH_CODES[selectedLang]||'en-IN';
+  const langBase=lang.split('-')[0];
+
+  // Priority order: Google/Microsoft neural voices > others
+  const premiumNames=['Google UK English Female','Google US English','Microsoft Aria','Microsoft Jenny',
+    'Microsoft Zira','Google हिन्दी','Google தமிழ்','Google తెలుగు','Google বাংলা',
+    'Google ગુજરાતી','Google ಕನ್ನಡ','Google മലയാളം'];
+
+  // Try exact lang match with premium voice first
+  _preferredVoice = voices.find(v=>v.lang===lang && premiumNames.some(n=>v.name.includes(n.split(' ').pop())))
+    || voices.find(v=>v.lang===lang && (v.name.includes('Female')||v.name.includes('Google')||v.name.includes('Microsoft')))
+    || voices.find(v=>v.lang===lang)
+    || voices.find(v=>v.lang.startsWith(langBase) && (v.name.includes('Female')||v.name.includes('Google')))
+    || voices.find(v=>v.lang.startsWith(langBase))
+    || voices.find(v=>v.lang==='en-IN')
+    || voices.find(v=>v.lang.startsWith('en'))
+    || null;
+}
+
+if(window.speechSynthesis){
+  window.speechSynthesis.onvoiceschanged=loadVoices;
+  loadVoices();
+}
+
+/* ── Speak a reply with human-sounding settings ── */
 function speakReply(text){
   if(!window.speechSynthesis)return;
-  // Strip markdown-like symbols for cleaner speech
-  const clean=text.replace(/[*_`#>~\[\]()]/g,'').replace(/⚠️|✅|🌤|🌧|⛈|🌊|🌀|🌡|🏚|⚡|🛡|📍/g,'').trim();
+
+  // Clean text for natural speech
+  const clean=text
+    .replace(/[*_`#>~\[\]]/g,'')
+    .replace(/⚠️|✅|🌤|🌧|⛈|🌊|🌀|🌡|🏚|⚡|🛡|📍|🔥|❄️|🌫|🏜/g,'')
+    .replace(/•/g,',')         // bullets become natural pauses
+    .replace(/\n\n/g,'. ')     // paragraph breaks become sentence pauses
+    .replace(/\n/g,', ')
+    .replace(/\s{2,}/g,' ')
+    .trim();
   if(!clean)return;
-  // Cancel any ongoing speech
+
   window.speechSynthesis.cancel();
-  const utt=new SpeechSynthesisUtterance(clean);
-  const code=LANG_SPEECH_CODES[selectedLang]||'en-IN';
-  utt.lang=code;
-  utt.rate=0.92;
-  utt.pitch=1.0;
-  utt.volume=1.0;
-  // Pick best available voice for the language
-  const voices=window.speechSynthesis.getVoices();
-  const match=voices.find(v=>v.lang===code)||voices.find(v=>v.lang.startsWith(code.split('-')[0]))||null;
-  if(match)utt.voice=match;
-  utt.onstart=()=>{
-    const btn=document.getElementById('voiceBtn');
-    if(btn){btn.textContent='🔊';btn.style.color='var(--teal2)';}
-  };
-  utt.onend=utt.onerror=()=>{
-    const btn=document.getElementById('voiceBtn');
-    if(btn){btn.textContent='🎤';btn.style.color='';}
-    if(_voiceMode)setTimeout(()=>startVoice(),150);// short gap so mic releases cleanly
-  };
+
+  // Split into chunks at sentence boundaries for smoother delivery
+  const sentences=clean.match(/[^.!?]+[.!?]*/g)||[clean];
+
+  let idx=0;
+  function speakNext(){
+    if(idx>=sentences.length){
+      // Done speaking — update UI
+      const btn=document.getElementById('voiceBtn');
+      if(btn){btn.textContent='🎤';btn.style.color='';btn.style.background=_voiceMode?'rgba(13,148,136,.25)':'';}
+      // Resume wake-word listening or active listening
+      if(_voiceMode){
+        setTimeout(()=>startCommandListening(),200);
+      }else{
+        setTimeout(()=>startWakeWordListening(),300);
+      }
+      return;
+    }
+    const s=sentences[idx++].trim();
+    if(!s){speakNext();return;}
+
+    const utt=new SpeechSynthesisUtterance(s);
+    const code=LANG_SPEECH_CODES[selectedLang]||'en-IN';
+    utt.lang=code;
+
+    // Human-sounding settings — slightly slower, natural pitch variation
+    utt.rate=0.88;
+    utt.pitch=1.05;
+    utt.volume=1.0;
+
+    // Use best available voice
+    if(!_voicesLoaded)loadVoices();
+    if(_preferredVoice)utt.voice=_preferredVoice;
+
+    utt.onstart=()=>{
+      const btn=document.getElementById('voiceBtn');
+      if(btn){btn.textContent='🔊';btn.style.color='var(--teal2)';}
+    };
+    utt.onend=speakNext;
+    utt.onerror=speakNext;
+    window.speechSynthesis.speak(utt);
+  }
+  speakNext();
+}
+
+/* ── Wake word listener (always running in background) ── */
+function startWakeWordListening(){
+  const Rec=window.SpeechRecognition||window.webkitSpeechRecognition;
+  if(!Rec||_wakeListening||_activeListening)return;
+  _wakeListening=true;
+
+  try{
+    _wakeRec=new Rec();
+    _wakeRec.lang='en-IN';          // English base catches "Raksha" reliably
+    _wakeRec.continuous=true;
+    _wakeRec.interimResults=true;
+    _wakeRec.maxAlternatives=1;
+
+    _wakeRec.onresult=function(e){
+      for(let i=e.resultIndex;i<e.results.length;i++){
+        const t=(e.results[i][0].transcript||'').toLowerCase().trim();
+        if(WAKE_WORDS.some(w=>t.includes(w))){
+          // Wake word detected!
+          _wakeRec.stop();
+          _wakeListening=false;
+          activateVoiceCommand();
+          return;
+        }
+      }
+    };
+
+    _wakeRec.onend=function(){
+      _wakeListening=false;
+      _wakeRec=null;
+      // Restart wake listener after a short pause (unless in active command mode)
+      if(!_activeListening){
+        setTimeout(()=>startWakeWordListening(),500);
+      }
+    };
+
+    _wakeRec.onerror=function(e){
+      _wakeListening=false;
+      _wakeRec=null;
+      if(e.error==='not-allowed'||e.error==='audio-capture')return; // no mic — stop trying
+      if(!_activeListening){
+        setTimeout(()=>startWakeWordListening(),2000);
+      }
+    };
+
+    _wakeRec.start();
+    // Show subtle indicator that wake word is active
+    _updateWakeIndicator(true);
+  }catch(err){
+    _wakeListening=false;
+  }
+}
+
+function stopWakeWordListening(){
+  if(_wakeRec){try{_wakeRec.stop();}catch(e){}}
+  _wakeListening=false;
+  _wakeRec=null;
+  _updateWakeIndicator(false);
+}
+
+function _updateWakeIndicator(on){
+  const btn=document.getElementById('voiceBtn');
+  if(!btn)return;
+  if(on&&!_voiceMode&&!_activeListening){
+    btn.style.opacity='0.7';
+    btn.title='Say "Raksha" to activate voice assistant';
+  }else{
+    btn.style.opacity='1';
+  }
+}
+
+/* ── Activate after wake word is heard ── */
+function activateVoiceCommand(){
+  _activeListening=true;
+  _updateWakeIndicator(false);
+  // Give audio feedback
+  speakShort('Yes, I am listening.');
+  setTimeout(()=>startCommandListening(),800);
+}
+
+function speakShort(txt){
+  if(!window.speechSynthesis)return;
+  window.speechSynthesis.cancel();
+  const utt=new SpeechSynthesisUtterance(txt);
+  utt.lang=LANG_SPEECH_CODES[selectedLang]||'en-IN';
+  utt.rate=1.0;utt.pitch=1.1;utt.volume=1.0;
+  if(_preferredVoice)utt.voice=_preferredVoice;
   window.speechSynthesis.speak(utt);
 }
 
-function toggleVoiceMode(){
-  _voiceMode=!_voiceMode;
-  const btn=document.getElementById('voiceBtn');
-  if(_voiceMode){
-    showToast('🎤 Voice Assistant ON — speak your question','info',2500);
-    if(btn)btn.style.background='rgba(13,148,136,.25)';
-    startVoice();
-  }else{
-    window.speechSynthesis&&window.speechSynthesis.cancel();
-    if(btn){btn.style.background='';btn.textContent='🎤';btn.style.color='';}
-    showToast('Voice Assistant OFF','info',1500);
-  }
-}
-
-function startVoice(){
+/* ── Command listener (after wake word) ── */
+function startCommandListening(){
   const Rec=window.SpeechRecognition||window.webkitSpeechRecognition;
-  if(!Rec){showToast('Voice not supported. Use Chrome or Edge.','error',4000);return;}
-  if(isRec)return;
+  if(!Rec)return;
 
   const btn=document.getElementById('voiceBtn');
   const inp=document.getElementById('msgInput');
-  isRec=true;
-  btn.classList.add('rec');
-  btn.textContent='🔴';
-  inp.placeholder='🎤 Listening…';
+  if(btn){btn.textContent='🔴';btn.classList.add('rec');btn.style.background='rgba(13,148,136,.25)';btn.style.opacity='1';}
+  inp.placeholder='🎤 Listening for your question…';
 
-  const rec=new Rec();
-  // Use 'en-US' as base for better multi-language detection, then refine
-  rec.lang=LANG_SPEECH_CODES[selectedLang]||'en-IN';
-  rec.continuous=false;
-  rec.interimResults=true;   // show interim so user sees it's working
-  rec.maxAlternatives=3;
+  try{
+    _cmdRec=new Rec();
+    _cmdRec.lang=LANG_SPEECH_CODES[selectedLang]||'en-IN';
+    _cmdRec.continuous=false;
+    _cmdRec.interimResults=true;
+    _cmdRec.maxAlternatives=3;
 
-  let finalTranscript='';
-  let interimTimeout=null;
+    let finalTxt='';
 
-  rec.onresult=function(e){
-    let interim='';
-    finalTranscript='';
-    for(let i=e.resultIndex;i<e.results.length;i++){
-      if(e.results[i].isFinal){
-        finalTranscript+=e.results[i][0].transcript;
-      }else{
-        interim+=e.results[i][0].transcript;
+    _cmdRec.onresult=function(e){
+      let interim='';
+      finalTxt='';
+      for(let i=e.resultIndex;i<e.results.length;i++){
+        if(e.results[i].isFinal) finalTxt+=e.results[i][0].transcript;
+        else interim+=e.results[i][0].transcript;
       }
-    }
-    // Show interim in input so user sees real-time transcription
-    inp.value=finalTranscript||interim;
-    autoResize(inp);
-    // Stop immediately on final result — no debounce delay
-    if(finalTranscript){
-      clearTimeout(interimTimeout);
-      inp.value=finalTranscript.trim();
-      rec.stop(); // triggers onend immediately
-    }
-  };
-
-  rec.onend=function(){
-    isRec=false;
-    btn.classList.remove('rec');
-    if(!_voiceMode)btn.textContent='🎤';
-    inp.placeholder='Ask me anything in your language…';
-    const txt=inp.value.trim();
-    if(txt){
-      sendMessage(); // immediate — no setTimeout
-    }else if(!_voiceMode){
-      showToast('No speech detected. Tap 🎤 to try again.','info',2500);
-    }
-  };
-
-  rec.onerror=function(e){
-    isRec=false;
-    btn.classList.remove('rec');
-    btn.textContent='🎤';
-    btn.style.color='';
-    inp.placeholder='Ask me anything in your language…';
-    if(e.error==='aborted')return;
-    const errMap={
-      'not-allowed':'Microphone access denied. Allow mic in browser settings.',
-      'no-speech':'No speech detected. Try again.',
-      'network':'Network error. Check your connection.',
-      'audio-capture':'No microphone found.',
+      inp.value=finalTxt||interim;
+      autoResize(inp);
+      if(finalTxt){_cmdRec.stop();}
     };
-    showToast(errMap[e.error]||'Voice error: '+e.error,'warning',4000);
-    if(_voiceMode){_voiceMode=false;btn.style.background='';}
-  };
 
-  rec.onaudiostart=function(){
-    // Visual feedback — pulse the button
-    btn.style.animation='recpulse 1s ease infinite';
-  };
+    _cmdRec.onend=function(){
+      _activeListening=false;
+      if(btn){btn.classList.remove('rec');btn.textContent='🎤';}
+      inp.placeholder='Ask me anything in your language…';
+      const txt=inp.value.trim();
+      if(txt){
+        _voiceMode=true; // ensure reply is spoken
+        sendMessage();
+      }else{
+        speakShort('I did not catch that. Say Raksha again to retry.');
+        setTimeout(()=>startWakeWordListening(),1500);
+      }
+    };
 
-  try{rec.start();}catch(e){
-    isRec=false;btn.classList.remove('rec');btn.textContent='🎤';
-    showToast('Could not start voice: '+e.message,'error');
+    _cmdRec.onerror=function(e){
+      _activeListening=false;
+      if(btn){btn.classList.remove('rec');btn.textContent='🎤';btn.style.background='';}
+      inp.placeholder='Ask me anything in your language…';
+      if(e.error!=='aborted'){
+        speakShort('Sorry, I had trouble hearing you. Please try again.');
+      }
+      setTimeout(()=>startWakeWordListening(),1500);
+    };
+
+    _cmdRec.start();
+  }catch(err){
+    _activeListening=false;
+    setTimeout(()=>startWakeWordListening(),1000);
   }
 }
+
+/* ── Manual voice button toggle ── */
+function toggleVoiceMode(){
+  if(_activeListening){
+    // Stop active listening
+    if(_cmdRec){try{_cmdRec.stop();}catch(e){}}
+    _activeListening=false;
+    _voiceMode=false;
+    window.speechSynthesis&&window.speechSynthesis.cancel();
+    const btn=document.getElementById('voiceBtn');
+    if(btn){btn.textContent='🎤';btn.style.background='';btn.classList.remove('rec');}
+    showToast('Voice stopped','info',1200);
+    setTimeout(()=>startWakeWordListening(),300);
+  }else{
+    // Manually activate command listening
+    _voiceMode=true;
+    stopWakeWordListening();
+    activateVoiceCommand();
+  }
+}
+
+// Legacy alias — keep for any external calls
+function startVoice(){ toggleVoiceMode(); }
 
 /* ═══ SHELTER FINDER ENGINE — Google Maps ═══ */
 let shelterMapInstance=null,shelterUserMarker=null,shelterMarkers=[];

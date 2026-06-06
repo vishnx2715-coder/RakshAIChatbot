@@ -1676,30 +1676,26 @@ GUIDELINES = {
 
 
 # ─── AI CORE ──────────────────────────────────────────────────
-SYSTEM = """You are RAKSHA — India's official AI disaster and weather assistant.
+SYSTEM = """You are RAKSHA — India's AI-powered disaster intelligence voice assistant. You speak warmly, clearly and naturally like a trusted human assistant.
 
 RULES (follow strictly):
 1. LANGUAGE: Reply in the exact same language as the user. Tamil input → Tamil reply. Hindi input → Hindi reply. English → English. Never switch languages.
 
-2. WEATHER (most important): When LIVE DATA is in this prompt, you MUST use it directly. Format weather replies like:
-   🌤 [City] Weather Right Now:
-   • Temperature: [temp]°C (feels like [feels]°C)
-   • Humidity: [humidity]%
-   • Wind: [wind] m/s
-   • Condition: [desc]
-   • Risk: [risk level]
-   NEVER say "I don't have real-time data" or "I can't check" when LIVE DATA is present.
+2. WEATHER (most important): When LIVE DATA is in this prompt, use it directly and naturally. Say things like "Right now in Chennai, it's 32 degrees and humid" not bullet points.
+   NEVER say "I don't have real-time data" when LIVE DATA is present.
 
-3. GENERAL: Answer all disaster safety, first aid, emergency, and general questions helpfully and directly.
+3. DISASTER NEWS: When NEWS DATA is in this prompt, summarise the most relevant alerts naturally. Say "There's currently a flood warning in..." not raw headlines.
 
-4. HELPLINES: NDMA:1078 | Emergency:112 | Fire:101 | Ambulance:108 | Police:100
+4. GENERAL: Answer all disaster safety, first aid, emergency, and general questions helpfully and conversationally.
 
-5. VOICE-FRIENDLY: Keep answers clear and direct. Avoid very long replies unless detailed info is needed.
+5. HELPLINES: NDMA 1078, Emergency 112, Fire 101, Ambulance 108, Police 100.
 
-6. No live data present → answer from knowledge, note it's not real-time.
+6. VOICE TONE: Speak like a caring, knowledgeable friend. Use natural pauses. Be warm but precise. Never robotic.
+
+7. No live data present → answer from knowledge, note it's not real-time.
 """
 
-def build_ctx(weather, risk):
+def build_ctx(weather, risk, news_items=None):
     parts = []
     if weather and "error" not in weather:
         parts.append(
@@ -1713,27 +1709,30 @@ def build_ctx(weather, risk):
         a = {k:v for k,v in risk["risks"].items() if v>0}
         if a:
             parts.append(f"NDMA RISK ({risk['overall']}): " + " | ".join(f"{k}={v}/5" for k,v in a.items()))
+    if news_items:
+        headlines = " | ".join(f"{n['title']}" for n in news_items[:5])
+        parts.append(f"LIVE DISASTER NEWS: {headlines}")
     return "\n".join(parts)
 
-def ask_ai(msg, weather=None, risk=None, history=None, username=None, lang="English", voice=False):
+def ask_ai(msg, weather=None, risk=None, history=None, username=None, lang="English", voice=False, news_items=None):
     system = SYSTEM
     if username:
-        system += f"\nUser's name: {username}."
+        system += f"\nUser's name: {username}. Address them by first name occasionally."
     system += f"\nAlways respond in: {lang}."
     if voice:
-        system += "\nVOICE MODE: Reply in maximum 2-3 short sentences. No bullet points, no markdown, no symbols. Speak naturally."
-    ctx = build_ctx(weather, risk)
+        system += "\nVOICE MODE: Reply in 2-3 natural spoken sentences maximum. No bullet points, no markdown, no emojis, no symbols. Speak conversationally as if talking to someone face-to-face."
+    ctx = build_ctx(weather, risk, news_items)
     if ctx:
         system += f"\n\n--- LIVE DATA (use this to answer) ---\n{ctx}\n--- END LIVE DATA ---"
     msgs = list((history or [])[-6:])
     msgs.append({"role": "user", "content": msg})
     if not groq_client:
-        return "⚠️ AI unavailable: GROQ_API_KEY is not configured. Please add it to your environment variables."
+        return "AI unavailable. Please add GROQ_API_KEY to your environment variables."
     try:
         r = groq_client.chat.completions.create(
             model=MODEL,
-            max_tokens=180 if voice else 800,  # much shorter = much faster for voice
-            temperature=0.2,
+            max_tokens=160 if voice else 800,
+            temperature=0.25,
             messages=[{"role": "system", "content": system}] + msgs
         )
         return r.choices[0].message.content
@@ -2367,8 +2366,13 @@ def chat():
         session["lang"] = d.get("lang")
         if "email" in session:
             db_update_lang(session["email"], d.get("lang"))
+
+    # Always fetch live news for voice queries; also for text if news-related keywords present
+    news_kws = ["news","alert","disaster","flood","cyclone","earthquake","warning","storm","latest","current","happening"]
+    needs_news = voice or any(k in lower for k in news_kws)
+    news_items = fetch_verified_news()[:5] if needs_news else None
     reply = ask_ai(msg, weather=weather, risk=risk, history=history,
-                   username=session.get("name"), lang=lang, voice=voice)
+                   username=session.get("name"), lang=lang, voice=voice, news_items=news_items)
     return jsonify({"reply": reply, "weather": weather, "risk": risk})
 
 @app.route("/")
