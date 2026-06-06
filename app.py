@@ -2358,7 +2358,12 @@ def chat():
         if weather and "error" not in weather:
             risk = compute_risk(weather)
 
-    lang = session.get("lang", "English")
+    lang = d.get("lang") or session.get("lang", "English")
+    # If frontend detected a different language, update the session too
+    if d.get("lang") and d.get("lang") != session.get("lang"):
+        session["lang"] = d.get("lang")
+        if "email" in session:
+            db_update_lang(session["email"], d.get("lang"))
     reply = ask_ai(msg, weather=weather, risk=risk, history=history,
                    username=session.get("name"), lang=lang)
     return jsonify({"reply": reply, "weather": weather, "risk": risk})

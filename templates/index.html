@@ -835,23 +835,34 @@ html,body{height:100%;font-family:var(--sans);overflow:hidden}
 <!-- APP -->
 <div id="app">
   <nav class="topbar">
-    <div class="t-logo" onclick="goPage('Dash')"><div class="t-ico">🛡</div><div><div class="t-name">RAK<em>SHA</em></div><div class="t-sub">Disaster Intelligence</div></div></div>
-    <div class="t-sep"></div>
-    <div class="nav-tabs">
-      <div class="nav-tab on" onclick="goPage('Dash')">📊 <span id="nt-dash">Dashboard</span></div>
-      <div class="nav-tab" onclick="goPage('Alerts')">🚨 <span id="nt-alerts">Alerts</span></div>
-      <div class="nav-tab" onclick="goPage('Guide')">📋 <span id="nt-guide">Guidelines</span></div>
-      <div class="nav-tab" onclick="goPage('Maps')">🗺 <span id="nt-maps">Maps</span></div>
-      <div class="nav-tab" onclick="goPage('Shelter')">🏠 <span id="nt-shelter">Shelters</span></div>
+    <!-- Row 1: logo + right controls (always visible) -->
+    <div class="t-row1">
+      <div class="t-logo" onclick="goPage('Dash')"><div class="t-ico">🛡</div><div><div class="t-name">RAK<em>SHA</em></div><div class="t-sub">Disaster Intelligence</div></div></div>
+      <div class="t-sep"></div>
+      <!-- Desktop nav tabs (hidden on mobile) -->
+      <div class="nav-tabs">
+        <div class="nav-tab on" onclick="goPage('Dash')">📊 <span id="nt-dash">Dashboard</span></div>
+        <div class="nav-tab" onclick="goPage('Alerts')">🚨 <span id="nt-alerts">Alerts</span></div>
+        <div class="nav-tab" onclick="goPage('Guide')">📋 <span id="nt-guide">Guidelines</span></div>
+        <div class="nav-tab" onclick="goPage('Maps')">🗺 <span id="nt-maps">Maps</span></div>
+        <div class="nav-tab" onclick="goPage('Shelter')">🏠 <span id="nt-shelter">Shelters</span></div>
+      </div>
+      <div class="t-right">
+        <div class="t-live"><div class="t-dot"></div><span id="navLive">LIVE</span></div>
+        <div class="t-clock" id="clockEl">—</div>
+        <div class="t-lang" onclick="openLangModal()"><span>🌐</span><span id="langChip">EN</span></div>
+        <div class="t-user"><div class="t-av" id="tAv">?</div><div class="t-uname" id="tName">—</div></div>
+        <button class="t-logout" id="navSignout" onclick="doLogout()">Sign Out</button>
+        <button class="mobile-logout-btn" onclick="doLogout()" title="Sign Out">⏏</button>
+      </div>
     </div>
-    <div class="t-right">
-      <div class="t-live"><div class="t-dot"></div><span id="navLive">LIVE</span></div>
-      <div class="t-clock" id="clockEl">—</div>
-      <div class="t-lang" onclick="openLangModal()"><span>🌐</span><span id="langChip">EN</span></div>
-      <div class="t-user"><div class="t-av" id="tAv">?</div><div class="t-uname" id="tName">—</div></div>
-      <button class="t-logout" id="navSignout" onclick="doLogout()">Sign Out</button>
-      <!-- Mobile: compact sign-out tap on avatar -->
-      <button class="mobile-logout-btn" onclick="doLogout()" title="Sign Out">⏏</button>
+    <!-- Row 2: mobile-only nav tabs (shown below logo row) -->
+    <div class="mobile-top-nav">
+      <button class="mtn-btn on" id="mtn-Dash"    onclick="goPage('Dash')">   <span class="mtn-ico">📊</span><span class="mtn-lbl" id="mnt-dash">Dashboard</span></button>
+      <button class="mtn-btn"    id="mtn-Alerts"  onclick="goPage('Alerts')"> <span class="mtn-ico">🚨</span><span class="mtn-lbl" id="mnt-alerts">Alerts</span></button>
+      <button class="mtn-btn"    id="mtn-Maps"    onclick="goPage('Maps')">   <span class="mtn-ico">🗺</span><span class="mtn-lbl" id="mnt-maps">Maps</span></button>
+      <button class="mtn-btn"    id="mtn-Shelter" onclick="goPage('Shelter')"><span class="mtn-ico">🏠</span><span class="mtn-lbl" id="mnt-shelter">Shelters</span></button>
+      <button class="mtn-btn"    id="mtn-Guide"   onclick="goPage('Guide')">  <span class="mtn-ico">📋</span><span class="mtn-lbl" id="mnt-guide">Guide</span></button>
     </div>
   </nav>
 
@@ -934,7 +945,7 @@ html,body{height:100%;font-family:var(--sans);overflow:hidden}
         <div class="ibar">
           <div class="irow">
             <textarea class="ita" id="msgInput" rows="1" placeholder="Ask in any Indian language…" onkeydown="handleKey(event)" oninput="autoResize(this)"></textarea>
-            <button class="ibtn ibtn-v" id="voiceBtn" onclick="startVoice()">🎤</button>
+            <button class="ibtn ibtn-v" id="voiceBtn" onclick="toggleVoiceMode()" title="Voice Assistant — tap to toggle">🎤</button>
             <button class="ibtn ibtn-s" id="sendBtn" onclick="sendMessage()">↑</button>
           </div>
           <div class="ihint">Enter to send · Shift+Enter new line · 🎤 voice · 🌐 22 languages</div>
@@ -1915,7 +1926,7 @@ function applyUILang(){
   const l=allLangs.find(x=>x.name===selectedLang)||{code:'en'};
   document.getElementById('langChip').textContent=l.code.toUpperCase();
 
-  // ── Nav labels (desktop + mobile) ──
+  // ── Nav labels (desktop + mobile top nav) ──
   const navMap={
     'dashboard':['nt-dash','mnt-dash'],
     'alerts':   ['nt-alerts','mnt-alerts'],
@@ -1986,13 +1997,17 @@ function goPage(id){
   document.querySelectorAll('.page').forEach(p=>p.classList.remove('on'));
   document.querySelectorAll('.nav-tab').forEach(t=>t.classList.remove('on'));
   document.querySelectorAll('.mobile-nav-btn').forEach(t=>t.classList.remove('on'));
+  document.querySelectorAll('.mtn-btn').forEach(t=>t.classList.remove('on'));
   const pg=document.getElementById('page'+id);
   if(pg)pg.classList.add('on');
   // Desktop nav
   const idx={Dash:0,Alerts:1,Guide:2,Maps:3,Shelter:4};
   const tabs=document.querySelectorAll('.nav-tab');
   if(tabs[idx[id]!==undefined?idx[id]:0])tabs[idx[id]!==undefined?idx[id]:0].classList.add('on');
-  // Mobile bottom nav
+  // Mobile top nav
+  const mtnBtn=document.getElementById('mtn-'+id);
+  if(mtnBtn)mtnBtn.classList.add('on');
+  // Mobile bottom nav (legacy, kept for compat)
   const mBtn=document.getElementById('mn-'+id);
   if(mBtn)mBtn.classList.add('on');
   if(id==='Alerts')loadAlerts();
@@ -2004,7 +2019,6 @@ function goPage(id){
     if(!shelterMapInstance){initShelterMap();}
     else{setTimeout(()=>{if(shelterMapInstance)shelterMapInstance.invalidateSize();},300);}
   }
-  // On mobile, scroll to top of page
   window.scrollTo({top:0,behavior:'smooth'});
 }
 
@@ -2768,24 +2782,32 @@ async function sendMessage(){
   loading=true;document.getElementById('sendBtn').disabled=true;
   inp.value='';inp.style.height='';
   addMsg(text,'user');chatHistory.push({role:'user',content:text});showTyping();
-  const body={message:text,history:chatHistory.slice(-8)};
+
+  // ── Auto-detect language from user input ──
+  const detected=detectLangFromText(text);
+  if(detected&&detected!==selectedLang){
+    selectedLang=detected;
+    applyUILang();
+    // Persist to server silently
+    fetch('/api/set-lang',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({lang:selectedLang})}).catch(()=>{});
+  }
+
+  const body={message:text,history:chatHistory.slice(-8),lang:selectedLang};
   if(userLat){body.lat=userLat;body.lon=userLon;}
   else if(currentWeather&&currentWeather.city){
-    // No GPS location but user searched a city — send it so the backend uses it
     body.city=currentWeather.city;
-    // Also send coords from weather so weather context is accurate
-    if(currentWeather.lat&&currentWeather.lon){
-      body.lat=currentWeather.lat;
-      body.lon=currentWeather.lon;
-    }
+    if(currentWeather.lat&&currentWeather.lon){body.lat=currentWeather.lat;body.lon=currentWeather.lon;}
   }
   try{
     const res=await fetch('/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
     const data=await res.json();hideTyping();
     if(data.risk&&data.risk.overall!=='NORMAL')showAB(data.risk);
     if(data.weather)updateWeather(data.weather,data.risk,currentForecast);
-    addMsg(data.reply||'⚠️ No response.','bot');
-    chatHistory.push({role:'assistant',content:data.reply});
+    const reply=data.reply||'⚠️ No response.';
+    addMsg(reply,'bot');
+    chatHistory.push({role:'assistant',content:reply});
+    // If voice mode is active, speak the reply
+    if(_voiceMode)speakReply(reply);
   }catch(e){hideTyping();addMsg('⚠️ Connection error: '+e.message,'bot');}
   loading=false;document.getElementById('sendBtn').disabled=false;
 }
@@ -2794,13 +2816,91 @@ function handleKey(e){if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendMe
 function autoResize(el){el.style.height='';el.style.height=Math.min(el.scrollHeight,85)+'px';}
 function resetChat(){chatHistory=[];const b=document.getElementById('msgBox');if(b)b.innerHTML=`<div class="welcome"><div class="w-em">🛡</div><div class="w-title">RAKSHA</div></div>`;}
 
-/* ═══ VOICE ═══ */
+/* ═══ LANGUAGE AUTO-DETECTION FROM TEXT ═══ */
+function detectLangFromText(text){
+  // Unicode script ranges → language mapping
+  const scripts=[
+    {re:/[\u0B80-\u0BFF]/,lang:'Tamil'},
+    {re:/[\u0900-\u097F]/,lang:'Hindi'},
+    {re:/[\u0C00-\u0C7F]/,lang:'Telugu'},
+    {re:/[\u0D00-\u0D7F]/,lang:'Malayalam'},
+    {re:/[\u0C80-\u0CFF]/,lang:'Kannada'},
+    {re:/[\u0980-\u09FF]/,lang:'Bengali'},
+    {re:/[\u0A80-\u0AFF]/,lang:'Gujarati'},
+    {re:/[\u0A00-\u0A7F]/,lang:'Punjabi'},
+    {re:/[\u0B00-\u0B7F]/,lang:'Odia'},
+    {re:/[\u0900-\u097F]/,lang:'Marathi'},  // Devanagari — check Hindi first
+    {re:/[\u0600-\u06FF]/,lang:'Urdu'},
+    {re:/[\u3040-\u30FF\u4E00-\u9FFF]/,lang:'Japanese'},
+    {re:/[\u0980-\u09FF]/,lang:'Assamese'},
+  ];
+  // Marathi vs Hindi: look for Marathi-specific common words
+  const marathiWords=['आहे','नाही','काय','कसे','मला','आपण','तुम्ही','माझे'];
+  if(marathiWords.some(w=>text.includes(w)))return'Marathi';
+  for(const s of scripts){
+    if(s.re.test(text))return s.lang;
+  }
+  // Default — no script detected, stay on current
+  return null;
+}
+
+/* ═══ VOICE ASSISTANT ═══ */
 const LANG_SPEECH_CODES={
   'English':'en-IN','Tamil':'ta-IN','Hindi':'hi-IN','Telugu':'te-IN',
   'Malayalam':'ml-IN','Kannada':'kn-IN','Bengali':'bn-IN','Marathi':'mr-IN',
   'Gujarati':'gu-IN','Punjabi':'pa-IN','Odia':'or-IN','Assamese':'as-IN',
   'Urdu':'ur-IN','Sanskrit':'sa-IN','Nepali':'ne-IN','Japanese':'ja-JP',
+  'Bengali':'bn-IN','Bodo':'en-IN','Dogri':'hi-IN','Kashmiri':'ur-IN',
+  'Konkani':'en-IN','Maithili':'hi-IN','Manipuri':'en-IN','Santali':'en-IN',
+  'Sindhi':'ur-IN',
 };
+
+let _voiceMode=false;     // true = voice assistant mode (speak replies)
+let _ttsQueue=[];         // pending speech queue
+let _ttsSpeaking=false;
+
+function speakReply(text){
+  if(!window.speechSynthesis)return;
+  // Strip markdown-like symbols for cleaner speech
+  const clean=text.replace(/[*_`#>~\[\]()]/g,'').replace(/⚠️|✅|🌤|🌧|⛈|🌊|🌀|🌡|🏚|⚡|🛡|📍/g,'').trim();
+  if(!clean)return;
+  // Cancel any ongoing speech
+  window.speechSynthesis.cancel();
+  const utt=new SpeechSynthesisUtterance(clean);
+  const code=LANG_SPEECH_CODES[selectedLang]||'en-IN';
+  utt.lang=code;
+  utt.rate=0.92;
+  utt.pitch=1.0;
+  utt.volume=1.0;
+  // Pick best available voice for the language
+  const voices=window.speechSynthesis.getVoices();
+  const match=voices.find(v=>v.lang===code)||voices.find(v=>v.lang.startsWith(code.split('-')[0]))||null;
+  if(match)utt.voice=match;
+  utt.onstart=()=>{
+    const btn=document.getElementById('voiceBtn');
+    if(btn){btn.textContent='🔊';btn.style.color='var(--teal2)';}
+  };
+  utt.onend=utt.onerror=()=>{
+    const btn=document.getElementById('voiceBtn');
+    if(btn){btn.textContent='🎤';btn.style.color='';}
+    if(_voiceMode)setTimeout(()=>startVoice(),600);// auto-listen after speaking
+  };
+  window.speechSynthesis.speak(utt);
+}
+
+function toggleVoiceMode(){
+  _voiceMode=!_voiceMode;
+  const btn=document.getElementById('voiceBtn');
+  if(_voiceMode){
+    showToast('🎤 Voice Assistant ON — speak your question','info',2500);
+    if(btn)btn.style.background='rgba(13,148,136,.25)';
+    startVoice();
+  }else{
+    window.speechSynthesis&&window.speechSynthesis.cancel();
+    if(btn){btn.style.background='';btn.textContent='🎤';btn.style.color='';}
+    showToast('Voice Assistant OFF','info',1500);
+  }
+}
 
 function startVoice(){
   const Rec=window.SpeechRecognition||window.webkitSpeechRecognition;
@@ -2811,36 +2911,54 @@ function startVoice(){
   const inp=document.getElementById('msgInput');
   isRec=true;
   btn.classList.add('rec');
-  btn.textContent='⏹';
+  btn.textContent='🔴';
   inp.placeholder='🎤 Listening…';
 
   const rec=new Rec();
+  // Use 'en-US' as base for better multi-language detection, then refine
   rec.lang=LANG_SPEECH_CODES[selectedLang]||'en-IN';
   rec.continuous=false;
-  rec.interimResults=false;
-  rec.maxAlternatives=1;
+  rec.interimResults=true;   // show interim so user sees it's working
+  rec.maxAlternatives=3;
 
-  let resultReceived=false;
+  let finalTranscript='';
+  let interimTimeout=null;
 
   rec.onresult=function(e){
-    resultReceived=true;
-    const transcript=e.results[0][0].transcript.trim();
-    const confidence=Math.round(e.results[0][0].confidence*100);
-    if(transcript){
-      inp.value=transcript;
-      inp.placeholder='Ask me anything in your language…';
-      // Small delay so user can see what was transcribed before it sends
-      setTimeout(()=>sendMessage(),300);
+    let interim='';
+    finalTranscript='';
+    for(let i=e.resultIndex;i<e.results.length;i++){
+      if(e.results[i].isFinal){
+        finalTranscript+=e.results[i][0].transcript;
+      }else{
+        interim+=e.results[i][0].transcript;
+      }
+    }
+    // Show interim in input so user sees real-time transcription
+    inp.value=finalTranscript||interim;
+    autoResize(inp);
+    // Debounce: send after 800ms silence if we have a final result
+    if(finalTranscript){
+      clearTimeout(interimTimeout);
+      interimTimeout=setTimeout(()=>{
+        if(finalTranscript.trim()){
+          inp.value=finalTranscript.trim();
+          rec.stop();
+        }
+      },300);
     }
   };
 
   rec.onend=function(){
     isRec=false;
     btn.classList.remove('rec');
-    btn.textContent='🎤';
+    if(!_voiceMode)btn.textContent='🎤';
     inp.placeholder='Ask me anything in your language…';
-    if(!resultReceived){
-      showToast('No speech detected. Try again.','info',2500);
+    const txt=inp.value.trim();
+    if(txt){
+      setTimeout(()=>sendMessage(),200);
+    }else if(!_voiceMode){
+      showToast('No speech detected. Tap 🎤 to try again.','info',2500);
     }
   };
 
@@ -2848,24 +2966,26 @@ function startVoice(){
     isRec=false;
     btn.classList.remove('rec');
     btn.textContent='🎤';
+    btn.style.color='';
     inp.placeholder='Ask me anything in your language…';
+    if(e.error==='aborted')return;
     const errMap={
       'not-allowed':'Microphone access denied. Allow mic in browser settings.',
       'no-speech':'No speech detected. Try again.',
       'network':'Network error. Check your connection.',
       'audio-capture':'No microphone found.',
-      'aborted':'Voice input cancelled.',
     };
-    const msg=errMap[e.error]||'Voice error: '+e.error;
-    showToast(msg,'warning',4000);
+    showToast(errMap[e.error]||'Voice error: '+e.error,'warning',4000);
+    if(_voiceMode){_voiceMode=false;btn.style.background='';}
   };
 
-  try{
-    rec.start();
-  }catch(e){
-    isRec=false;
-    btn.classList.remove('rec');
-    btn.textContent='🎤';
+  rec.onaudiostart=function(){
+    // Visual feedback — pulse the button
+    btn.style.animation='recpulse 1s ease infinite';
+  };
+
+  try{rec.start();}catch(e){
+    isRec=false;btn.classList.remove('rec');btn.textContent='🎤';
     showToast('Could not start voice: '+e.message,'error');
   }
 }
