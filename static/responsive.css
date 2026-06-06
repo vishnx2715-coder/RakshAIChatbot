@@ -45,19 +45,42 @@ input, select, textarea { font-size: 16px !important; }
     flex: 1 !important;
     min-height: 0 !important;
     overflow: hidden !important;
-    display: block !important;
-    height: auto !important;
     margin-top: 0 !important;
     padding-bottom: 0 !important;
+    /* Keep as flex container — pages flex inside it */
+    display: flex !important;
+    height: 100% !important;
   }
   .page {
     display: none !important;
+    width: 100% !important;
     height: 100% !important;
     overflow: hidden !important;
-    flex-direction: row !important;
     animation: pageIn .3s ease !important;
+    flex-direction: column !important; /* each page is a flex column */
   }
   .page.on { display: flex !important; }
+
+  /* Individual page directions */
+  #pageDash.on    { flex-direction: row !important; }
+  #pageAlerts.on  { flex-direction: column !important; }
+  #pageGuide.on   { flex-direction: column !important; }
+  #pageMaps.on    { flex-direction: column !important; }
+  #pageShelter.on { flex-direction: column !important; }
+
+  /* Alerts page — full height scrolling list */
+  #pageAlerts { flex-direction: column !important; overflow: hidden !important; }
+  .alerts-scroll {
+    flex: 1 !important;
+    overflow-y: auto !important;
+    height: auto !important;
+    padding: 20px !important;
+  }
+  .alerts-section-body {
+    display: grid !important;
+    grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)) !important;
+    gap: 12px !important;
+  }
 
   /* ── Restore desktop nav tabs ── */
   .nav-tabs  { display: flex !important; }
@@ -86,29 +109,121 @@ input, select, textarea { font-size: 16px !important; }
   }
 
   /* ── Restore desktop maps ── */
-  .maps-body  { flex-direction: row !important; height: auto !important; overflow: hidden !important; }
-  .maps-sb    { width: 232px !important; height: auto !important; max-height: none !important; overflow-y: auto !important; overflow-x: hidden !important; flex-direction: column !important; flex-wrap: nowrap !important; padding: 11px !important; border-bottom: none !important; border-right: 1px solid var(--line) !important; background: rgba(2,12,27,.88) !important; }
-  .maps-sb .ms-card { flex-shrink: 1 !important; min-width: auto !important; }
+  #pageMaps { flex-direction: column !important; overflow: hidden !important; }
+  .maps-body  {
+    flex: 1 !important;
+    display: flex !important;
+    flex-direction: row !important;
+    height: auto !important;
+    min-height: 0 !important;
+    overflow: hidden !important;
+  }
+  .maps-sb    {
+    width: 232px !important;
+    height: auto !important;
+    max-height: none !important;
+    overflow-y: auto !important;
+    overflow-x: hidden !important;
+    flex-direction: column !important;
+    flex-wrap: nowrap !important;
+    padding: 11px !important;
+    border-bottom: none !important;
+    border-right: 1px solid var(--line) !important;
+    background: rgba(2,12,27,.88) !important;
+    flex-shrink: 0 !important;
+    display: flex !important;
+    gap: 6px !important;
+  }
+  .maps-sb .ms-card { flex-shrink: 0 !important; min-width: auto !important; width: auto !important; padding: 9px !important; }
   .maps-sb .ms-card:last-child { display: block !important; }
-  .maps-main  { flex: 1 !important; height: auto !important; max-height: none !important; width: auto !important; }
-  .map-wrap   { flex: 1 !important; height: 100% !important; position: relative !important; }
+  .maps-main  {
+    flex: 1 !important;
+    display: flex !important;
+    flex-direction: column !important;
+    height: auto !important;
+    max-height: none !important;
+    width: auto !important;
+    overflow: hidden !important;
+    min-height: 0 !important;
+  }
+  .map-wrap   {
+    flex: 1 !important;
+    position: relative !important;
+    overflow: hidden !important;
+    width: 100% !important;
+    height: 100% !important;
+    min-height: 0 !important;
+  }
   #leafletMap { position: absolute !important; inset: 0 !important; width: 100% !important; height: 100% !important; }
-  .map-tabs   { flex-wrap: nowrap !important; overflow-x: visible !important; }
-  .tv-bar     { position: absolute !important; }
-  #mapLegend  { position: absolute !important; top: 12px !important; right: 12px !important; }
+  .map-tabs   { flex-wrap: nowrap !important; overflow-x: visible !important; flex-shrink: 0 !important; }
+  .tv-bar     { position: absolute !important; display: none; }
+  #mapLegend  { position: absolute !important; top: 12px !important; right: 12px !important; left: auto !important; margin: 0 !important; max-width: none !important; }
 
   /* ── Restore desktop shelter ── */
-  #shelterBody { flex-direction: row !important; height: auto !important; overflow: hidden !important; }
-  #shelterListPanel { width: 330px !important; height: auto !important; max-height: none !important; border-right: 1px solid var(--line) !important; border-top: none !important; order: 0 !important; }
-  #shelterMapArea { order: 0 !important; height: auto !important; max-height: none !important; }
-  .shelter-legend-box { display: block !important; }
+  #pageShelter { flex-direction: column !important; overflow: hidden !important; }
+  #shelterBody {
+    flex: 1 !important;
+    display: flex !important;
+    flex-direction: row !important;
+    height: auto !important;
+    min-height: 0 !important;
+    overflow: hidden !important;
+  }
+  #shelterListPanel {
+    width: 330px !important;
+    height: auto !important;
+    max-height: none !important;
+    border-right: 1px solid var(--line) !important;
+    border-top: none !important;
+    border-bottom: none !important;
+    order: 0 !important;
+    flex-shrink: 0 !important;
+    overflow: hidden !important;
+    display: flex !important;
+    flex-direction: column !important;
+  }
+  #shelterMapArea {
+    order: 0 !important;
+    flex: 1 !important;
+    height: auto !important;
+    max-height: none !important;
+    min-height: 0 !important;
+    position: relative !important;
+    overflow: hidden !important;
+  }
+  #shelterMap { position: absolute !important; inset: 0 !important; width: 100% !important; height: 100% !important; }
+  .shelter-legend-box { display: block !important; position: absolute !important; top: 10px !important; right: 10px !important; }
 
   /* ── Restore desktop guide ── */
-  .guide-body { flex-direction: row !important; height: auto !important; overflow: hidden !important; }
-  .guide-nav  { display: block !important; width: 200px !important; height: auto !important; border-right: 1px solid var(--line) !important; border-bottom: none !important; overflow-y: auto !important; }
-  .guide-btn-wrap { display: block !important; max-height: none !important; }
-  .gnbtn { width: 100% !important; white-space: normal !important; }
-  .guide-content { height: auto !important; overflow-y: auto !important; }
+  #pageGuide { flex-direction: column !important; overflow: hidden !important; }
+  .guide-body {
+    flex: 1 !important;
+    display: flex !important;
+    flex-direction: row !important;
+    height: auto !important;
+    min-height: 0 !important;
+    overflow: hidden !important;
+  }
+  .guide-nav  {
+    display: flex !important;
+    flex-direction: column !important;
+    width: 200px !important;
+    height: auto !important;
+    border-right: 1px solid var(--line) !important;
+    border-bottom: none !important;
+    overflow-y: auto !important;
+    padding: 10px !important;
+    flex-shrink: 0 !important;
+  }
+  .guide-btn-wrap { display: block !important; max-height: none !important; overflow: visible !important; }
+  .gnbtn { width: 100% !important; white-space: normal !important; min-height: auto !important; }
+  .guide-content {
+    flex: 1 !important;
+    height: auto !important;
+    min-height: 0 !important;
+    overflow-y: auto !important;
+    padding: 18px !important;
+  }
 
   /* ── Restore desktop msgs ── */
   .msgs { flex: 1 !important; height: auto !important; max-height: none !important; overflow-y: auto !important; }
