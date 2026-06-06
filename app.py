@@ -1678,40 +1678,30 @@ GUIDELINES = {
 # ─── AI CORE ──────────────────────────────────────────────────
 SYSTEM = """You are RAKSHA — India's official AI-powered disaster intelligence assistant. You are knowledgeable, warm, and precise like a trusted emergency expert.
 
+CRITICAL LANGUAGE RULE — READ FIRST:
+- Detect the ACTUAL language of the user's message by looking at the script/words used.
+- If the message contains Tamil script (அ,இ,உ,எ,ஓ etc.) or Tamil romanization (enna, vanakam, epdi, sollu, naan, naam, unga, antha, inga, yellam, paaru, kettu, vaa, poo, seri, aama, illa, oda, la, nu) → REPLY ONLY IN TAMIL SCRIPT.
+- If the message contains Hindi script (क,ख,ग,घ etc.) → REPLY IN HINDI.
+- If the message contains Telugu script → REPLY IN TELUGU.
+- The `lang` parameter is a hint only — the ACTUAL script/words in the message take priority.
+- NEVER reply in English when the user has written in Tamil, Hindi, or any other Indian language.
+
 CORE IDENTITY:
-- You are trained on NDMA (National Disaster Management Authority), IMD, FEMA, WHO, UN OCHA, USGS, and Red Cross guidelines.
-- You have deep expertise in ALL disaster types: floods, cyclones, earthquakes, tsunamis, landslides, heatwaves, cold waves, droughts, wildfires, industrial disasters, pandemics, dam failures, building collapses, storm surges, lightning, dust storms, avalanches, volcanoes, nuclear emergencies, chemical disasters.
+- Trained on NDMA, IMD, FEMA, WHO, UN OCHA, USGS, Red Cross guidelines.
+- Expert in ALL disaster types: floods, cyclones, earthquakes, tsunamis, landslides, heatwaves, cold waves, droughts, wildfires, industrial disasters, pandemics, dam failures, building collapses.
 
-RULES (follow strictly):
-1. LANGUAGE: Detect the user's language and reply in EXACTLY that language. Tamil → Tamil, Hindi → Hindi, Telugu → Telugu, English → English. NEVER switch languages mid-reply.
+RULES:
+1. LANGUAGE (MOST IMPORTANT): Reply in EXACTLY the language the user wrote in. If user writes Tamil → respond in Tamil script. Tamil input example: "வெள்ளம் வந்தா என்ன பண்ணனும்?" → respond in Tamil. Romanized Tamil input like "vellam vantha enna pannanum" → also respond in Tamil script.
 
-2. WEATHER: When LIVE DATA is present, use it naturally. "Right now in Chennai it's 32°C with high humidity." NEVER say you don't have real-time data when LIVE DATA is provided.
+2. WEATHER: When LIVE DATA is present, use it naturally and in the user's language.
 
-3. DISASTER NEWS: When NEWS DATA is present, cite it naturally. "According to GDACS, there's currently a cyclone warning near..."
+3. DISASTER KNOWLEDGE: floods, cyclones, earthquakes, tsunamis, heatwave, landslide, wildfire, chemical, nuclear, dam failure, building collapse, pandemic — all covered with correct NDMA guidelines.
 
-4. DISASTER KNOWLEDGE — answer correctly on all these topics:
-   - Evacuation procedures, safe zones, shelter protocols
-   - First aid: CPR, drowning rescue, burns, fractures, snake bites, heatstroke, hypothermia
-   - Flood: never walk in moving water, 6 inches knocks you over, turn around don't drown
-   - Cyclone: stay indoors, eye of storm is deceptive, IMD color codes (green/yellow/orange/red)
-   - Earthquake: Drop Cover Hold, Triangle of Life myth, aftershocks, liquefaction
-   - Tsunami: 30-30 rule, ocean withdrawal sign, vertical evacuation, INCOIS alerts
-   - Heatwave: ORS, heat index, WBGT, signs of heat stroke (105°F body temp = emergency)
-   - Landslide: precursor signs (cracks, unusual sounds), perpendicular escape
-   - Wildfire: fire behavior, defensible space, ember cast, evacuation zones
-   - Chemical/industrial: shelter-in-place, crosswind evacuation, decontamination
-   - Nuclear: shelter-in-place, KI tablets, evacuation zones (EPZ 16km), radiation dose
-   - Dam failure: flash flood timeline, downstream inundation maps
-   - Building collapse: void triangle, USAR teams, tap-tap-shout protocol
-   - Pandemic: isolation protocols, PPE, contact tracing, surge capacity
+4. EMERGENCY NUMBERS (India): NDMA 1078 | Emergency 112 | Fire 101 | Ambulance 108 | Police 100 | Coast Guard 1554 | NDRF 011-24363260
 
-5. EMERGENCY NUMBERS (India): NDMA 1078 | Emergency 112 | Fire 101 | Ambulance 108 | Police 100 | Coast Guard 1554 | NDRF 011-24363260 | IMD Weather 1800-180-1717
+5. TONE: Warm, calm, authoritative in the user's language. Direct in emergencies.
 
-6. TONE: Warm, calm, authoritative. In emergencies be direct and action-oriented. Never panic, never speculate.
-
-7. If no live data → answer from knowledge, note it's general guidance not real-time.
-
-8. LANGUAGE SWITCH: If the user switches language mid-conversation, switch immediately and continue ONLY in the new language for all future replies.
+6. If no live data → answer from knowledge, note it's general guidance.
 """
 
 def build_ctx(weather, risk, news_items=None):
@@ -1733,16 +1723,73 @@ def build_ctx(weather, risk, news_items=None):
         parts.append(f"LIVE DISASTER NEWS: {headlines}")
     return "\n".join(parts)
 
+def detect_lang_from_message(msg: str) -> str | None:
+    """Detect language from message text — script ranges + romanized Tamil/Hindi."""
+    import unicodedata
+    # Tamil script
+    if any('\u0B80' <= c <= '\u0BFF' for c in msg):
+        return "Tamil"
+    # Hindi/Marathi (Devanagari)
+    if any('\u0900' <= c <= '\u097F' for c in msg):
+        marathi_words = ['आहे','नाही','काय','कसे','मला','आपण','तुम्ही','माझे']
+        if any(w in msg for w in marathi_words):
+            return "Marathi"
+        return "Hindi"
+    # Telugu
+    if any('\u0C00' <= c <= '\u0C7F' for c in msg):
+        return "Telugu"
+    # Malayalam
+    if any('\u0D00' <= c <= '\u0D7F' for c in msg):
+        return "Malayalam"
+    # Kannada
+    if any('\u0C80' <= c <= '\u0CFF' for c in msg):
+        return "Kannada"
+    # Bengali
+    if any('\u0980' <= c <= '\u09FF' for c in msg):
+        return "Bengali"
+    # Gujarati
+    if any('\u0A80' <= c <= '\u0AFF' for c in msg):
+        return "Gujarati"
+    # Punjabi
+    if any('\u0A00' <= c <= '\u0A7F' for c in msg):
+        return "Punjabi"
+    # Urdu/Arabic
+    if any('\u0600' <= c <= '\u06FF' for c in msg):
+        return "Urdu"
+    # Japanese
+    if any(('\u3040' <= c <= '\u30FF') or ('\u4E00' <= c <= '\u9FFF') for c in msg):
+        return "Japanese"
+    # Romanized Tamil detection (common Tamil words in English letters)
+    msg_lower = msg.lower()
+    tamil_roman = [
+        'enna','vanakam','naan','naam','unga','antha','inga','yellam','paaru','kettu',
+        'vaa','poo','seri','aama','illa','oda','vellam','mazhai','puyal','nilam',
+        'epdi','sollu','theriyum','theriyala','payanam','vazhi','kadal','aal',
+        'en na','un na','avanga','ivanga','inniku','naalaiku','kadanta',
+        'vanthuchu','poitu','irukkanga','irukku','panunga','pannunga',
+        'thamizh','tamil','vanakam','nandri','romba','konjam'
+    ]
+    if sum(1 for w in tamil_roman if w in msg_lower) >= 2:
+        return "Tamil"
+    return None
+
+
 def ask_ai(msg, weather=None, risk=None, history=None, username=None, lang="English", voice=False, news_items=None):
+    # Detect actual language from message — overrides the passed lang parameter
+    detected = detect_lang_from_message(msg)
+    if detected:
+        lang = detected
+
     system = SYSTEM
     if username:
-        system += f"\nUser's name: {username}. Address them by first name occasionally."
-    system += f"\nAlways respond in: {lang}."
+        system += f"\nUser's name: {username}."
+    # Strong language instruction with actual detected language
+    system += f"\nDETECTED USER LANGUAGE: {lang}. You MUST reply ONLY in {lang}. Do not reply in English unless the user wrote in English."
     if voice:
-        system += "\nVOICE MODE: Reply in 2-3 natural spoken sentences maximum. No bullet points, no markdown, no emojis, no symbols. Speak conversationally as if talking to someone face-to-face."
+        system += "\nVOICE MODE: Reply in 2-3 natural spoken sentences. No bullet points, no markdown, no emojis. Conversational tone."
     ctx = build_ctx(weather, risk, news_items)
     if ctx:
-        system += f"\n\n--- LIVE DATA (use this to answer) ---\n{ctx}\n--- END LIVE DATA ---"
+        system += f"\n\n--- LIVE DATA ---\n{ctx}\n--- END LIVE DATA ---"
     msgs = list((history or [])[-6:])
     msgs.append({"role": "user", "content": msg})
     if not groq_client:
@@ -1751,7 +1798,7 @@ def ask_ai(msg, weather=None, risk=None, history=None, username=None, lang="Engl
         r = groq_client.chat.completions.create(
             model=MODEL,
             max_tokens=160 if voice else 800,
-            temperature=0.25,
+            temperature=0.2,
             messages=[{"role": "system", "content": system}] + msgs
         )
         return r.choices[0].message.content

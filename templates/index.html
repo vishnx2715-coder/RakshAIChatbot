@@ -3030,13 +3030,12 @@ function _startCmdRec(){
 
   try{
     _cmdRec=new Rec();
-    // KEY FIX: use the user's selected language, but allow any language input
-    // by setting lang to their current language — the browser will still
-    // transcribe what they actually say
+    // Use the user's current selected language for best transcription accuracy
+    // This ensures Tamil users get Tamil script output, not romanized text
     _cmdRec.lang=LANG_SPEECH_CODES[selectedLang]||'en-IN';
     _cmdRec.continuous=false;
     _cmdRec.interimResults=true;
-    _cmdRec.maxAlternatives=5;  // more alternatives = better chance of correct transcription
+    _cmdRec.maxAlternatives=5;
 
     let finalTxt='', gotResult=false;
 
@@ -3045,7 +3044,7 @@ function _startCmdRec(){
       finalTxt='';
       for(let i=e.resultIndex;i<e.results.length;i++){
         if(e.results[i].isFinal){
-          // Pick the alternative with highest confidence
+          // Pick best confidence alternative
           let best=e.results[i][0];
           for(let j=1;j<e.results[i].length;j++){
             if(e.results[i][j].confidence>best.confidence)best=e.results[i][j];
@@ -3066,19 +3065,17 @@ function _startCmdRec(){
       _setBtn('idle');
       const txt=(inp?inp.value:'').trim();
       if(txt&&gotResult){
-        // ── Auto-detect language from the spoken text ──
+        // Detect language from transcribed text
         const detected=detectLangFromText(txt);
         if(detected&&detected!==selectedLang){
           selectedLang=detected;
           applyUILang();
-          loadVoices(detected);  // reload voice for new language
+          loadVoices(detected);
           fetch('/api/set-lang',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({lang:selectedLang})}).catch(()=>{});
-          showToast(`Switched to ${selectedLang}`,'info',1500);
         }
-        _voiceMode=true;  // ensure reply is spoken aloud
+        _voiceMode=true;
         sendMessage();
       }else{
-        // Nothing heard — go back to wake word listening
         speakShort('I did not catch that. Say Raksha to try again.',()=>{
           _wakeTimer=setTimeout(()=>startWakeWordListening(),500);
         });
@@ -3089,9 +3086,8 @@ function _startCmdRec(){
       _cmdRec=null; _cmdActive=false;
       if(inp)inp.placeholder='Ask me anything in your language…';
       _setBtn('idle');
-      if(e.error!=='aborted'){
-        _wakeTimer=setTimeout(()=>startWakeWordListening(),2000);
-      }
+      if(e.error==='not-allowed'||e.error==='audio-capture'){return;}
+      if(e.error!=='aborted'){_wakeTimer=setTimeout(()=>startWakeWordListening(),2000);}
     };
 
     _cmdRec.start();
