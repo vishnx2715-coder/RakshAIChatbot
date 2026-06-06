@@ -1663,12 +1663,11 @@ function appInit(){
   useMyLocation();loadNews();loadAlerts();
   loadGuide('flood',document.querySelector('.gnbtn'));
   startClock();initScrollReveal();
-  // Start always-on wake word listener ("Raksha")
+  // Start always-on wake word listener immediately
   if(window.SpeechRecognition||window.webkitSpeechRecognition){
     setTimeout(()=>{
       startWakeWordListening();
-      showToast('🎤 Say "Raksha" to activate voice assistant','info',3500);
-    },2000);
+    },1500);
   }
 }
 async function checkSession(){
@@ -2816,8 +2815,13 @@ async function sendMessage(){
     const reply=data.reply||'⚠️ No response.';
     addMsg(reply,'bot');
     chatHistory.push({role:'assistant',content:reply});
-    // If voice mode is active, speak the reply
-    if(_voiceMode)speakReply(reply);
+    // If voice mode is active, speak the reply then resume wake-word listening
+    if(_voiceMode){
+      speakReply(reply, _afterSpeakResume);
+    }else{
+      // Even in text mode, restart wake-word listening after each message
+      _wakeTimer=setTimeout(()=>startWakeWordListening(),500);
+    }
   }catch(e){hideTyping();addMsg('⚠️ Connection error: '+e.message,'bot');}
   loading=false;document.getElementById('sendBtn').disabled=false;
 }
@@ -2854,7 +2858,9 @@ function detectLangFromText(text){
   return null;
 }
 
-/* ═══ VOICE ASSISTANT — Reliable wake word + command flow ═══ */
+/* ═══ VOICE ASSISTANT v3 — Always-on, multilingual, wake word ═══ */
+
+// Language codes for speech recognition + TTS
 const LANG_SPEECH_CODES={
   'English':'en-IN','Tamil':'ta-IN','Hindi':'hi-IN','Telugu':'te-IN',
   'Malayalam':'ml-IN','Kannada':'kn-IN','Bengali':'bn-IN','Marathi':'mr-IN',
@@ -2863,18 +2869,27 @@ const LANG_SPEECH_CODES={
   'Bodo':'en-IN','Dogri':'hi-IN','Kashmiri':'ur-IN','Konkani':'en-IN',
   'Maithili':'hi-IN','Manipuri':'en-IN','Santali':'en-IN','Sindhi':'ur-IN',
 };
-const WAKE_WORDS=['raksha','raksa','raxa','rakhsha','raksa'];
 
-let _voiceMode=false, _wakeActive=false, _cmdActive=false, _ttsActive=false;
-let _wakeRec=null, _cmdRec=null, _wakeTimer=null;
-let _preferredVoice=null, _voicesLoaded=false;
+// Wake word variants across scripts
+const WAKE_WORDS=['raksha','raksa','rakhsha','raxa','ராக்‌ஷா','ராட்ஷா','रक्षा','రక్ష','ರಕ್ಷ','രക്ഷ'];
 
-function loadVoices(){
+let _voiceMode   = false;   // reply-aloud mode
+let _wakeActive  = false;   // wake-word loop running
+let _cmdActive   = false;   // command listen active
+let _ttsActive   = false;   // TTS speaking
+let _wakeRec     = null;
+let _cmdRec      = null;
+let _wakeTimer   = null;
+let _preferredVoice = null;
+let _voicesLoaded   = false;
+
+/* ── Pick best available TTS voice for current language ── */
+function loadVoices(forceLang){
   if(!window.speechSynthesis)return;
   const voices=window.speechSynthesis.getVoices();
   if(!voices.length)return;
   _voicesLoaded=true;
-  const code=LANG_SPEECH_CODES[selectedLang]||'en-IN';
+  const code=LANG_SPEECH_CODES[forceLang||selectedLang]||'en-IN';
   const base=code.split('-')[0];
   _preferredVoice=
     voices.find(v=>v.lang===code&&/Google|Microsoft/i.test(v.name)&&/Female|Aria|Jenny|Zira/i.test(v.name))
@@ -2884,154 +2899,236 @@ function loadVoices(){
     ||voices.find(v=>v.lang.startsWith(base))
     ||voices.find(v=>v.lang.startsWith('en'))||null;
 }
-if(window.speechSynthesis){window.speechSynthesis.onvoiceschanged=loadVoices;loadVoices();}
+if(window.speechSynthesis){window.speechSynthesis.onvoiceschanged=()=>loadVoices();loadVoices();}
 
-function speakReply(text,onDone){
+/* ── Speak reply in current language ── */
+function speakReply(text, onDone){
   if(!window.speechSynthesis){onDone&&onDone();return;}
+  // Strip markdown/emoji for clean speech
   const clean=text
     .replace(/[*_`#>~\[\]]/g,'')
-    .replace(/[\u26A0\u2705\u{1F324}-\u{1F32C}\u{1F30A}\u{1F300}\u{1F321}\u{1F3DA}\u26A1\u{1F6E1}\u{1F4CD}\u{1F525}\u2744\u{1F32B}\u{1F3DC}]/gu,'')
-    .replace(/\u26A0\uFE0F|\u2705|\u{1F6E1}|\u{1F4CD}/gu,'')
+    .replace(/[^\p{L}\p{N}\p{P}\p{Z}\n]/gu,' ')
     .replace(/•/g,', ').replace(/\n\n/g,'. ').replace(/\n/g,', ')
     .replace(/\s{2,}/g,' ').trim();
   if(!clean){onDone&&onDone();return;}
+
   _ttsActive=true;
   window.speechSynthesis.cancel();
   const btn=document.getElementById('voiceBtn');
+
   const chunks=(clean.match(/[^.!?]+[.!?]*/g)||[clean]).filter(s=>s.trim());
   let i=0;
+
   function next(){
     if(i>=chunks.length){
       _ttsActive=false;
-      if(btn){btn.textContent='🎤';btn.style.color='';btn.style.background=_voiceMode?'rgba(13,148,136,.25)':'';}
-      onDone&&onDone();return;
+      if(btn){btn.textContent='🎤';btn.style.color='';btn.style.background=_wakeActive||_voiceMode?'rgba(13,148,136,.15)':'';}
+      onDone&&onDone();
+      return;
     }
     const utt=new SpeechSynthesisUtterance(chunks[i++].trim());
+    // Always speak in the language the reply was generated in
     utt.lang=LANG_SPEECH_CODES[selectedLang]||'en-IN';
-    utt.rate=0.9;utt.pitch=1.05;utt.volume=1.0;
+    utt.rate=0.9; utt.pitch=1.05; utt.volume=1.0;
     if(!_voicesLoaded)loadVoices();
     if(_preferredVoice)utt.voice=_preferredVoice;
     utt.onstart=()=>{if(btn){btn.textContent='🔊';btn.style.color='var(--teal2)';}};
-    utt.onend=next;utt.onerror=next;
+    utt.onend=next; utt.onerror=next;
     window.speechSynthesis.speak(utt);
   }
   next();
 }
 function speakShort(txt,cb){speakReply(txt,cb);}
 
+/* ── Button state helper ── */
 function _setBtn(state){
   const b=document.getElementById('voiceBtn');if(!b)return;
   b.style.animation='';
-  if(state==='wake'){b.textContent='🎤';b.style.opacity='0.65';b.style.background='';b.classList.remove('rec');}
-  else if(state==='listen'){b.textContent='🔴';b.style.opacity='1';b.style.background='rgba(13,148,136,.25)';b.classList.add('rec');}
-  else if(state==='speak'){b.textContent='🔊';b.style.opacity='1';b.style.color='var(--teal2)';}
-  else{b.textContent='🎤';b.style.opacity='1';b.style.background='';b.style.color='';b.classList.remove('rec');}
+  switch(state){
+    case 'wake':    b.textContent='🎤';b.style.opacity='0.6';b.style.background='rgba(124,58,237,.1)';b.style.color='#a78bfa';b.classList.remove('rec');break;
+    case 'listen':  b.textContent='🔴';b.style.opacity='1';b.style.background='rgba(244,63,94,.2)';b.style.color='var(--rose3)';b.classList.add('rec');break;
+    case 'speak':   b.textContent='🔊';b.style.opacity='1';b.style.color='var(--teal2)';b.style.background='rgba(13,148,136,.15)';break;
+    default:        b.textContent='🎤';b.style.opacity='1';b.style.background='';b.style.color='';b.classList.remove('rec');
+  }
 }
 
+/* ════════════════════════════════════════════════
+   WAKE WORD LISTENER — always running in background
+   Uses en-IN + user language to catch "Raksha" in any script
+   ════════════════════════════════════════════════ */
 function startWakeWordListening(){
   const Rec=window.SpeechRecognition||window.webkitSpeechRecognition;
   if(!Rec||_wakeActive||_cmdActive||_ttsActive)return;
   clearTimeout(_wakeTimer);
   _wakeActive=true;
   _setBtn('wake');
+
   try{
     _wakeRec=new Rec();
-    _wakeRec.lang='en-IN';
+    // Use user's current language — if they say "Raksha" in Tamil script it will still match
+    _wakeRec.lang=LANG_SPEECH_CODES[selectedLang]||'en-IN';
     _wakeRec.continuous=false;
     _wakeRec.interimResults=false;
     _wakeRec.maxAlternatives=5;
+
     _wakeRec.onresult=function(e){
       for(let i=0;i<e.results.length;i++){
         for(let j=0;j<e.results[i].length;j++){
-          const t=(e.results[i][j].transcript||'').toLowerCase().replace(/[^a-z\u0900-\u097f\u0b80-\u0bff]/g,' ');
+          const t=(e.results[i][j].transcript||'').toLowerCase();
           if(WAKE_WORDS.some(w=>t.includes(w))){
-            _wakeActive=false;_wakeRec=null;
-            activateVoiceCommand();return;
+            _wakeActive=false; _wakeRec=null;
+            activateVoiceCommand();
+            return;
           }
         }
       }
     };
     _wakeRec.onend=function(){
-      _wakeActive=false;_wakeRec=null;
-      if(!_cmdActive&&!_ttsActive){_wakeTimer=setTimeout(()=>startWakeWordListening(),1000);}
+      _wakeActive=false; _wakeRec=null;
+      if(!_cmdActive&&!_ttsActive){
+        _wakeTimer=setTimeout(()=>startWakeWordListening(), 800);
+      }
     };
     _wakeRec.onerror=function(e){
-      _wakeActive=false;_wakeRec=null;
+      _wakeActive=false; _wakeRec=null;
       if(e.error==='not-allowed'||e.error==='audio-capture'){_setBtn('idle');return;}
-      if(!_cmdActive&&!_ttsActive){_wakeTimer=setTimeout(()=>startWakeWordListening(),4000);}
+      const delay=e.error==='network'?5000:3000;
+      if(!_cmdActive&&!_ttsActive){_wakeTimer=setTimeout(()=>startWakeWordListening(),delay);}
     };
     _wakeRec.start();
-  }catch(err){_wakeActive=false;_wakeTimer=setTimeout(()=>startWakeWordListening(),4000);}
+  }catch(err){
+    _wakeActive=false;
+    _wakeTimer=setTimeout(()=>startWakeWordListening(),4000);
+  }
 }
 
 function stopWakeWordListening(){
   clearTimeout(_wakeTimer);
   if(_wakeRec){try{_wakeRec.stop();}catch(e){}}
-  _wakeRec=null;_wakeActive=false;
+  _wakeRec=null; _wakeActive=false;
 }
 
+/* ════════════════════════════════════════════════
+   COMMAND LISTENER — multilingual, auto-detects spoken language
+   ════════════════════════════════════════════════ */
 function activateVoiceCommand(){
   _cmdActive=true;
   stopWakeWordListening();
   _setBtn('speak');
-  speakShort('Yes?',()=>{if(_cmdActive)_startCmdRec();});
+  // Brief audio acknowledgement, then listen
+  speakShort('Yes?', ()=>{
+    if(_cmdActive) _startCmdRec();
+  });
 }
 
 function _startCmdRec(){
   const Rec=window.SpeechRecognition||window.webkitSpeechRecognition;
   if(!Rec){_cmdActive=false;return;}
   const inp=document.getElementById('msgInput');
-  if(inp)inp.placeholder='🎤 Listening…';
+  if(inp)inp.placeholder='🎤 Listening… speak in any language';
   _setBtn('listen');
+
   try{
     _cmdRec=new Rec();
+    // KEY FIX: use the user's selected language, but allow any language input
+    // by setting lang to their current language — the browser will still
+    // transcribe what they actually say
     _cmdRec.lang=LANG_SPEECH_CODES[selectedLang]||'en-IN';
-    _cmdRec.continuous=false;_cmdRec.interimResults=true;_cmdRec.maxAlternatives=3;
-    let finalTxt='',gotResult=false;
+    _cmdRec.continuous=false;
+    _cmdRec.interimResults=true;
+    _cmdRec.maxAlternatives=5;  // more alternatives = better chance of correct transcription
+
+    let finalTxt='', gotResult=false;
+
     _cmdRec.onresult=function(e){
-      let interim='';finalTxt='';
+      let interim='';
+      finalTxt='';
       for(let i=e.resultIndex;i<e.results.length;i++){
-        if(e.results[i].isFinal){finalTxt+=e.results[i][0].transcript;gotResult=true;}
-        else interim+=e.results[i][0].transcript;
+        if(e.results[i].isFinal){
+          // Pick the alternative with highest confidence
+          let best=e.results[i][0];
+          for(let j=1;j<e.results[i].length;j++){
+            if(e.results[i][j].confidence>best.confidence)best=e.results[i][j];
+          }
+          finalTxt+=best.transcript;
+          gotResult=true;
+        }else{
+          interim+=e.results[i][0].transcript;
+        }
       }
       if(inp){inp.value=finalTxt||interim;autoResize(inp);}
       if(finalTxt){try{_cmdRec.stop();}catch(e){}}
     };
+
     _cmdRec.onend=function(){
-      _cmdRec=null;_cmdActive=false;
+      _cmdRec=null; _cmdActive=false;
       if(inp)inp.placeholder='Ask me anything in your language…';
       _setBtn('idle');
       const txt=(inp?inp.value:'').trim();
-      if(txt&&gotResult){_voiceMode=true;sendMessage();}
-      else{speakShort('I did not catch that. Say Raksha to try again.',()=>{_wakeTimer=setTimeout(()=>startWakeWordListening(),600);});}
+      if(txt&&gotResult){
+        // ── Auto-detect language from the spoken text ──
+        const detected=detectLangFromText(txt);
+        if(detected&&detected!==selectedLang){
+          selectedLang=detected;
+          applyUILang();
+          loadVoices(detected);  // reload voice for new language
+          fetch('/api/set-lang',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({lang:selectedLang})}).catch(()=>{});
+          showToast(`Switched to ${selectedLang}`,'info',1500);
+        }
+        _voiceMode=true;  // ensure reply is spoken aloud
+        sendMessage();
+      }else{
+        // Nothing heard — go back to wake word listening
+        speakShort('I did not catch that. Say Raksha to try again.',()=>{
+          _wakeTimer=setTimeout(()=>startWakeWordListening(),500);
+        });
+      }
     };
+
     _cmdRec.onerror=function(e){
-      _cmdRec=null;_cmdActive=false;
+      _cmdRec=null; _cmdActive=false;
       if(inp)inp.placeholder='Ask me anything in your language…';
       _setBtn('idle');
-      if(e.error!=='aborted'){_wakeTimer=setTimeout(()=>startWakeWordListening(),2000);}
+      if(e.error!=='aborted'){
+        _wakeTimer=setTimeout(()=>startWakeWordListening(),2000);
+      }
     };
+
     _cmdRec.start();
-  }catch(err){_cmdActive=false;_wakeTimer=setTimeout(()=>startWakeWordListening(),2000);}
+  }catch(err){
+    _cmdActive=false;
+    _wakeTimer=setTimeout(()=>startWakeWordListening(),2000);
+  }
 }
 
+/* ════════════════════════════════════════════════
+   MANUAL VOICE BUTTON — tap to speak directly
+   ════════════════════════════════════════════════ */
 function toggleVoiceMode(){
   if(_cmdActive){
+    // Stop current listening
     if(_cmdRec){try{_cmdRec.stop();}catch(e){}}
-    _cmdActive=false;_voiceMode=false;
+    _cmdActive=false; _voiceMode=false;
     if(window.speechSynthesis)window.speechSynthesis.cancel();
-    _ttsActive=false;_setBtn('idle');
-    showToast('Voice stopped','info',1200);
+    _ttsActive=false;
+    _setBtn('idle');
+    showToast('Voice stopped','info',1000);
     _wakeTimer=setTimeout(()=>startWakeWordListening(),600);
-  }else if(_wakeActive){
-    stopWakeWordListening();_voiceMode=true;activateVoiceCommand();
   }else{
+    // Manually activate — no need to say "Raksha"
     _voiceMode=true;
-    showToast('🎤 Say "Raksha" or tap again to speak','info',2000);
+    stopWakeWordListening();
     activateVoiceCommand();
   }
 }
 function startVoice(){toggleVoiceMode();}
+
+/* ── After speaking reply, resume wake-word listening ── */
+// (called from sendMessage after speakReply completes via onDone callback)
+function _afterSpeakResume(){
+  if(_wakeActive||_cmdActive)return;
+  _wakeTimer=setTimeout(()=>startWakeWordListening(),500);
+}
 
 /* ═══ SHELTER FINDER ENGINE — Google Maps ═══ */
 let shelterMapInstance=null,shelterUserMarker=null,shelterMarkers=[];
