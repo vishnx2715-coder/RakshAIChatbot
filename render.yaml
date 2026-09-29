@@ -5,10 +5,15 @@ services:
     buildCommand: pip install -r requirements.txt
     startCommand: gunicorn app:app
     envVars:
+      - key: FLASK_ENV
+        value: production
       - key: SECRET_KEY
         generateValue: true
       - key: GROQ_API_KEY
         sync: false
+      - key: OPENWEATHER_API_KEY
+        sync: false
+      # Legacy name alias — keep until all deploys migrate to OPENWEATHER_API_KEY
       - key: WEATHER_API_KEY
         sync: false
       - key: SUPABASE_URL
@@ -16,4 +21,10 @@ services:
       - key: SUPABASE_KEY
         sync: false
       - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_MAPS_KEY
+        sync: false
+      - key: ORS_API_KEY
+        sync: false
+      - key: REDIS_URL
         sync: false
