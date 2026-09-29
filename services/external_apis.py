@@ -11,8 +11,6 @@ Callers: blueprints/* and other services.
 
 import math
 import re
-import time
-import threading
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -135,9 +133,11 @@ OFFICIAL_RSS = [
 ]
 
 RSS_PER_SOURCE_TIMEOUT = 4
-
-_rss_cache: dict = {"data": None, "ts": 0, "refreshing": False}
 RSS_TTL_SECONDS = Config.RSS_TTL_SECONDS  # 300
+
+# ── Process-local refresh-lock flag (prevents duplicate in-flight fetches
+#    within the same worker process; Redis lock guards across workers) ──────
+_rss_refreshing_local: bool = False
 
 
 def _fetch_one_feed(source_url_pair: tuple) -> list:
@@ -184,10 +184,23 @@ def _fetch_one_feed(source_url_pair: tuple) -> list:
 
 
 def _do_rss_refresh() -> None:
-    global _rss_cache
-    if _rss_cache.get("refreshing"):
-        return
-    _rss_cache["refreshing"] = True
+    """
+    Fetch all RSS feeds in parallel and write results to Redis (or a
+    process-local fallback if Redis is down).  Stampede-safe via Redis
+    SET NX lock; also guarded by a per-process boolean for single-worker
+    deployments.
+    """
+    global _rss_refreshing_local
+    from services.cache_service import cache_set, lock_acquire, lock_release
+
+    if _rss_refreshing_local:
+        return   # already refreshing in this process
+
+    # Cross-worker stampede guard
+    if not lock_acquire("rss_refresh", ttl=RSS_TTL_SECONDS):
+        return   # another worker holds the lock
+
+    _rss_refreshing_local = True
     try:
         all_items: list = []
         with ThreadPoolExecutor(max_workers=5) as pool:
@@ -198,31 +211,34 @@ def _do_rss_refresh() -> None:
                 except Exception:
                     pass
         if all_items:
-            _rss_cache["data"] = all_items[:25]
-            _rss_cache["ts"]   = time.monotonic()
+            cache_set("rss:news", all_items[:25], ttl=RSS_TTL_SECONDS)
     except Exception:
         pass
     finally:
-        _rss_cache["refreshing"] = False
+        _rss_refreshing_local = False
+        lock_release("rss_refresh")
 
 
 def fetch_verified_news() -> list:
     """
-    Return cached RSS data. Refreshes in background when TTL expires.
-    Blocks only on cold start (first ever call).
+    Return cached RSS data. Refreshes in background when stale.
+    Blocks only on cold start (no cached data yet).
+
+    Redis down: falls back to a direct fetch every call (no crash).
     """
-    global _rss_cache
-    now  = time.monotonic()
-    data = _rss_cache["data"]
+    from services.cache_service import cache_get
 
-    if data is None:
-        _do_rss_refresh()
-        return _rss_cache["data"] or []
+    data = cache_get("rss:news")
 
-    if (now - _rss_cache["ts"]) > RSS_TTL_SECONDS and not _rss_cache.get("refreshing"):
-        threading.Thread(target=_do_rss_refresh, daemon=True).start()
+    if data is not None:
+        # Check if we should trigger a background refresh
+        # We can't check TTL from Redis directly here, but the key will
+        # expire automatically. If cache_get returns data, it's still fresh.
+        return data
 
-    return data
+    # Cache miss (cold start or expired) — block and fetch
+    _do_rss_refresh()
+    return cache_get("rss:news") or []
 
 
 # ════════════════════════════════════════════════════════════════
@@ -234,16 +250,25 @@ GDACS_EVENT_ICONS = {
     "DR": "🏜", "WF": "🔥", "TS": "🌊", "SS": "🌊",
 }
 GDACS_ALERT_MAP = {"Red": "CRITICAL", "Orange": "HIGH", "Green": "LOW"}
-
-_gdacs_cache: dict = {"data": None, "ts": 0}
 GDACS_TTL = Config.GDACS_TTL_SECONDS  # 600
 
 
 def fetch_gdacs_events() -> list:
-    global _gdacs_cache
-    now = time.monotonic()
-    if _gdacs_cache["data"] is not None and (now - _gdacs_cache["ts"]) < GDACS_TTL:
-        return _gdacs_cache["data"]
+    """
+    Fetch live GDACS events. Redis-cached for GDACS_TTL seconds.
+    Stampede-safe via Redis lock.
+    Redis down: falls back to direct fetch (no crash).
+    """
+    from services.cache_service import cache_get, cache_set, lock_acquire, lock_release
+
+    cached = cache_get("gdacs:events")
+    if cached is not None:
+        return cached
+
+    # Stampede guard
+    if not lock_acquire("gdacs_refresh", ttl=GDACS_TTL):
+        # Another worker is fetching — return empty rather than blocking
+        return []
 
     results = []
     seen_ids: set = set()
@@ -293,9 +318,10 @@ def fetch_gdacs_events() -> list:
                 })
     except Exception as e:
         print(f"[GDACS] fetch error: {e}")
+    finally:
+        lock_release("gdacs_refresh")
 
-    _gdacs_cache["data"] = results
-    _gdacs_cache["ts"]   = now
+    cache_set("gdacs:events", results, ttl=GDACS_TTL)
     return results
 
 

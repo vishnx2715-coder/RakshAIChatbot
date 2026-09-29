@@ -1,0 +1,18 @@
+# docker-compose.yml — Local Redis for RAKSHA development
+#
+# Usage:
+#   docker compose up -d redis
+#   Add to .env:  REDIS_URL=redis://localhost:6379
+#
+# Redis is NOT required for development — the app falls back to
+# direct API fetches when Redis is unavailable.
+# In production (Render), add a Redis instance and set REDIS_URL.
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: raksha-redis
+    ports:
+      - "6379:6379"
+    command: redis-server --save 60 1 --loglevel warning
+    restart: unless-stopped

@@ -7,7 +7,6 @@ Routes:
   POST /api/risk-analysis
 """
 
-import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from flask import Blueprint, jsonify, request
@@ -44,7 +43,6 @@ INDIA_RISK_CITIES = [
     {"name": "Visakhapatnam",      "lat": 17.68, "lon": 83.21},
 ]
 
-_india_risk_cache: dict = {"data": None, "ts": 0}
 INDIA_RISK_TTL = Config.INDIA_RISK_TTL_SECONDS
 
 
@@ -62,10 +60,11 @@ def weather_only():
 
 @weather_bp.route("/api/india-weather-risk")
 def india_weather_risk():
-    global _india_risk_cache
-    now = time.monotonic()
-    if _india_risk_cache["data"] is not None and (now - _india_risk_cache["ts"]) < INDIA_RISK_TTL:
-        return jsonify(_india_risk_cache["data"])
+    from services.cache_service import cache_get, cache_set
+
+    cached = cache_get("india:risk")
+    if cached is not None:
+        return jsonify(cached)
 
     results = []
 
@@ -112,8 +111,7 @@ def india_weather_risk():
         "source": "OpenWeatherMap live data",
         "note": "Only HIGH and CRITICAL risk cities shown",
     }
-    _india_risk_cache["data"] = payload
-    _india_risk_cache["ts"]   = now
+    cache_set("india:risk", payload, ttl=INDIA_RISK_TTL)
     return jsonify(payload)
 
 
