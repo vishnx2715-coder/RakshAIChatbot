@@ -3,7 +3,7 @@ services:
     name: raksha-app
     runtime: python
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app
+    startCommand: gunicorn "app:create_app()" --workers 3 --timeout 60
     envVars:
       - key: FLASK_ENV
         value: production
