@@ -1,5 +1,5 @@
 from flask import Flask, request, jsonify, session
-import requests, os, json, hashlib, secrets, time, threading
+import requests, os, json, secrets, time, threading
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -54,7 +54,10 @@ else:
     print("ℹ️  No Supabase creds — using local users.json")
 
 USERS_FILE = "users.json"
-def hash_pw(p): return hashlib.sha256(p.encode()).hexdigest()
+
+# ── Password hashing — argon2id, with legacy SHA-256 upgrade ──
+from blueprints.auth.services import hash_password, verify_password, needs_rehash
+
 def _load_users():
     if not os.path.exists(USERS_FILE): return {}
     with open(USERS_FILE, encoding="utf-8") as f: return json.load(f)
@@ -79,7 +82,7 @@ def db_create_user(name, email, pw, phone):
             res = supabase.table("users").insert({
                 "name": name,
                 "email": email,
-                "password": hash_pw(pw),
+                "password": hash_password(pw),
                 "phone": phone or "",
                 "lang": "English",
                 "joined": datetime.utcnow().isoformat(),      # TIMESTAMPTZ — ISO format
@@ -93,7 +96,7 @@ def db_create_user(name, email, pw, phone):
             return None
     users = _load_users()
     users[email] = {
-        "name": name, "email": email, "password": hash_pw(pw),
+        "name": name, "email": email, "password": hash_password(pw),
         "phone": phone or "", "lang": "English",
         "joined": now_str, "last_login": now_str, "login_count": 1,
         "auth_provider": "email",
@@ -128,6 +131,19 @@ def db_update_lang(email, lang):
         return
     users = _load_users()
     if email in users: users[email]["lang"] = lang; _save_users(users)
+
+def db_update_password(email, new_hash):
+    """Persist an upgraded password hash (legacy SHA-256 → argon2)."""
+    if USE_SUPABASE:
+        try:
+            supabase.table("users").update({"password": new_hash}).eq("email", email).execute()
+        except Exception as e:
+            print(f"[db_update_password] Supabase error: {e}")
+        return
+    users = _load_users()
+    if email in users:
+        users[email]["password"] = new_hash
+        _save_users(users)
 
 # ─── ALL 22 OFFICIAL INDIAN LANGUAGES ────────
 ALL_LANGUAGES = [
@@ -1725,26 +1741,52 @@ def ask_ai(msg, weather=None, risk=None, history=None, username=None, lang="Engl
 # ─── AUTH ROUTES ──────────────────────────────────────────────
 @app.route("/api/register", methods=["POST"])
 def register():
-    d=request.json; name=d.get("name","").strip(); email=d.get("email","").strip().lower(); pw=d.get("password","")
-    if not all([name,email,pw]): return jsonify({"status":"error","message":"All fields required."})
-    if len(pw)<6: return jsonify({"status":"error","message":"Password min 6 characters."})
-    if "@" not in email: return jsonify({"status":"error","message":"Invalid email."})
-    if db_get_user(email): return jsonify({"status":"error","message":"Email already registered."})
-    phone=d.get("phone","")
+    d = request.json or {}
+    name  = d.get("name", "").strip()
+    email = d.get("email", "").strip().lower()
+    pw    = d.get("password", "")
+    if not all([name, email, pw]):
+        return jsonify({"status": "error", "message": "All fields required."})
+    if len(pw) < 8:
+        return jsonify({"status": "error", "message": "Password must be at least 8 characters."})
+    if "@" not in email:
+        return jsonify({"status": "error", "message": "Invalid email."})
+    if db_get_user(email):
+        return jsonify({"status": "error", "message": "Email already registered."})
+    phone = d.get("phone", "")
     user = db_create_user(name, email, pw, phone)
-    if not user: return jsonify({"status":"error","message":"Registration failed. Please try again."})
-    session["email"]=email; session["name"]=name; session["lang"]="English"
-    return jsonify({"status":"success","name":name,"lang":"English"})
+    if not user:
+        return jsonify({"status": "error", "message": "Registration failed. Please try again."})
+    session["email"] = email; session["name"] = name; session["lang"] = "English"
+    return jsonify({"status": "success", "name": name, "lang": "English"})
 
 @app.route("/api/login", methods=["POST"])
 def login():
-    d=request.json; email=d.get("email","").strip().lower(); pw=d.get("password","")
-    if not email or not pw: return jsonify({"status":"error","message":"Email and password required."})
+    d     = request.json or {}
+    email = d.get("email", "").strip().lower()
+    pw    = d.get("password", "")
+    if not email or not pw:
+        return jsonify({"status": "error", "message": "Invalid credentials."})
     user = db_get_user(email)
-    if not user or user["password"] != hash_pw(pw): return jsonify({"status":"error","message":"Invalid email or password."})
+    # Generic message — no user enumeration
+    _INVALID = jsonify({"status": "error", "message": "Invalid credentials."})
+    if not user:
+        return _INVALID
+    stored = user.get("password", "")
+    if not verify_password(stored, pw):
+        return _INVALID
+    # ── Transparent legacy SHA-256 → argon2 upgrade ──────────
+    if needs_rehash(stored):
+        try:
+            new_hash = hash_password(pw)
+            db_update_password(email, new_hash)
+        except Exception as e:
+            print(f"[login] rehash failed for {email}: {e}")
     db_record_login(email)
-    session["email"]=email; session["name"]=user["name"]; session["lang"]=user.get("lang","English")
-    return jsonify({"status":"success","name":user["name"],"lang":user.get("lang","English")})
+    session["email"] = email
+    session["name"]  = user["name"]
+    session["lang"]  = user.get("lang", "English")
+    return jsonify({"status": "success", "name": user["name"], "lang": user.get("lang", "English")})
 
 
 # ═══════════════════════════════════════════════════════════════
