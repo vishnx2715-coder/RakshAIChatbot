@@ -1,7 +1,17 @@
-# Secrets — never commit these
+# ─── Secrets — NEVER commit these ───────────────────────────
 .env
+.env.*
+!.env.example
 
-# Python
+# ─── Local user data — NEVER commit ─────────────────────────
+users.json
+
+# ─── Logs ────────────────────────────────────────────────────
+*.log
+*.log.*
+logs/
+
+# ─── Python ──────────────────────────────────────────────────
 __pycache__/
 *.pyc
 *.pyo
@@ -13,14 +23,17 @@ build/
 venv/
 .venv/
 env/
+instance/
 
-# Local data
-users.json
-
-# OS
+# ─── OS ──────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
 
-# IDE
+# ─── IDE ─────────────────────────────────────────────────────
 .vscode/
 .idea/
+
+# ─── Test / coverage ─────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
