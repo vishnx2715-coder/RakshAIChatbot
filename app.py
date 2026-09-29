@@ -51,12 +51,13 @@ def create_app() -> Flask:
     # ── Root route ────────────────────────────────────────────
     @app.route("/")
     def home():
-        with open("templates/index.html", encoding="utf-8") as f:
-            html = f.read()
-        html = html.replace("{{ google_client_id }}", Config.GOOGLE_CLIENT_ID or "")
-        html = html.replace("{{ google_maps_key }}",  Config.GOOGLE_MAPS_KEY or "")
-        html = html.replace("{{ owm_key }}",           Config.OPENWEATHER_API_KEY or "")
-        return html
+        from flask import render_template
+        return render_template(
+            "index.html",
+            google_client_id=Config.GOOGLE_CLIENT_ID or "",
+            google_maps_key=Config.GOOGLE_MAPS_KEY or "",
+            owm_key=Config.OPENWEATHER_API_KEY or "",
+        )
 
     # ── Centralised JSON error handlers ───────────────────────
     @app.errorhandler(400)
