@@ -5,13 +5,16 @@ Routes:
   POST /chat
 """
 
-from flask import Blueprint, jsonify, request, session
+from flask import Blueprint, current_app, jsonify, request, session
 
 from services.ai_service import ask_ai
 from services.external_apis import get_weather_city, get_weather_coords
 from services.risk_engine import compute_risk
 
 chat_bp = Blueprint("chat", __name__)
+
+_MAX_MSG  = 800   # characters
+_MAX_CITY = 100
 
 # ── City name lookup lists ────────────────────────────────────
 _INDIA_CITIES = [
@@ -76,17 +79,27 @@ def chat():
     if "email" not in session:
         return jsonify({"reply": "⚠️ Please log in."}), 401
 
-    d         = request.json or {}
-    msg       = d.get("message", "").strip()
+    lim = current_app.extensions.get("limiter")
+    if lim:
+        lim.limit("60 per hour")(lambda: None)()
+
+    d         = request.get_json(force=True, silent=True) or {}
+    msg       = str(d.get("message", ""))[:_MAX_MSG].strip()
     lat       = d.get("lat")
     lon       = d.get("lon")
     history   = d.get("history", [])
-    sent_city = d.get("city", "").strip()
+    sent_city = str(d.get("city", ""))[:_MAX_CITY].strip()
 
     if not msg:
         return jsonify({"reply": "⚠️ Empty."})
-    if len(msg) > 800:
-        return jsonify({"reply": "⚠️ Too long."})
+    # History: cap at last 6 turns, ignore malformed entries
+    if isinstance(history, list):
+        history = [
+            h for h in history[-6:]
+            if isinstance(h, dict) and h.get("role") in ("user", "assistant")
+        ]
+    else:
+        history = []
 
     lower = msg.lower()
     needs_w = any(k in lower for k in _WEATHER_KWS) or bool(lat) or bool(sent_city)

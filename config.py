@@ -58,9 +58,12 @@ def _optional(var: str, default: str = "") -> str:
 
 
 class Config:
+    # ── Env detection ─────────────────────────────────────────
+    FLASK_ENV: str = _ENV
+    IS_PRODUCTION: bool = IS_PRODUCTION
+
     # ── Core Flask ─────────────────────────────────────────────
     SECRET_KEY: str = _require("SECRET_KEY")
-    FLASK_ENV: str = _ENV
 
     # ── External APIs (required) ───────────────────────────────
     GROQ_API_KEY: str = _require("GROQ_API_KEY")

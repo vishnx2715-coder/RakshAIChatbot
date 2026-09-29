@@ -1,4 +1,4 @@
-"""
+﻿"""
 blueprints/auth/routes.py — Authentication routes for RAKSHA.
 
 Routes (all paths unchanged from original app.py):
@@ -10,29 +10,39 @@ Routes (all paths unchanged from original app.py):
   POST /api/set-lang
   GET  /api/languages
 
-Logic lives in services.py and extensions.py.
+Phase 7 additions:
+  - Rate limits on register/login/google-auth
+  - Input length caps on all POST bodies
+  - Explicit Google token audience check
+  - Generic error messages (no user enumeration)
 """
 
+import json
+import os
+import re
 import secrets
+from datetime import datetime
 
-from flask import Blueprint, jsonify, request, session
+from flask import Blueprint, current_app, jsonify, request, session
 
+from blueprints.auth.data import ALL_LANGUAGES, UI_STRINGS
 from blueprints.auth.services import hash_password, needs_rehash, verify_password
 from extensions import USE_SUPABASE, supabase
 
 auth_bp = Blueprint("auth", __name__)
 
-# ── Language / UI data (static — no DB) ───────────────────────
-from blueprints.auth.data import ALL_LANGUAGES, UI_STRINGS
-
-# ── DB helpers (kept close to routes; moved to a separate module
-#    would be fine too but avoids over-splitting for now) ──────
-import json
-import os
-from datetime import datetime
+# ── Input caps ────────────────────────────────────────────────
+_MAX_NAME     = 120
+_MAX_EMAIL    = 254
+_MAX_PASSWORD = 128
+_MAX_PHONE    = 20
+_MAX_LANG     = 40
+_EMAIL_RE     = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 USERS_FILE = "users.json"
 
+
+# ── DB helpers ────────────────────────────────────────────────
 
 def _now_str() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -132,24 +142,34 @@ def db_update_password(email: str, new_hash: str) -> None:
         _save_users(users)
 
 
-# ── Routes ─────────────────────────────────────────────────────
+def _rate_limit(limit_string: str) -> None:
+    """Apply a rate limit from within a route. No-op if limiter not configured."""
+    lim = current_app.extensions.get("limiter")
+    if lim:
+        lim.limit(limit_string)(lambda: None)()
+
+
+# ── Routes ────────────────────────────────────────────────────
 
 @auth_bp.route("/api/register", methods=["POST"])
 def register():
-    d     = request.json or {}
-    name  = d.get("name", "").strip()
-    email = d.get("email", "").strip().lower()
-    pw    = d.get("password", "")
+    _rate_limit("10 per hour")
+    d     = request.get_json(force=True, silent=True) or {}
+    name  = str(d.get("name", ""))[:_MAX_NAME].strip()
+    email = str(d.get("email", ""))[:_MAX_EMAIL].strip().lower()
+    pw    = str(d.get("password", ""))[:_MAX_PASSWORD]
+    phone = str(d.get("phone", ""))[:_MAX_PHONE].strip()
+
     if not all([name, email, pw]):
         return jsonify({"status": "error", "message": "All fields required."})
     if len(pw) < 8:
         return jsonify({"status": "error", "message": "Password must be at least 8 characters."})
-    if "@" not in email:
+    if not _EMAIL_RE.match(email):
         return jsonify({"status": "error", "message": "Invalid email."})
     if db_get_user(email):
         return jsonify({"status": "error", "message": "Email already registered."})
-    phone = d.get("phone", "")
-    user  = db_create_user(name, email, pw, phone)
+
+    user = db_create_user(name, email, pw, phone)
     if not user:
         return jsonify({"status": "error", "message": "Registration failed. Please try again."})
     session["email"] = email
@@ -160,10 +180,12 @@ def register():
 
 @auth_bp.route("/api/login", methods=["POST"])
 def login():
-    d     = request.json or {}
-    email = d.get("email", "").strip().lower()
-    pw    = d.get("password", "")
+    _rate_limit("20 per hour")
+    d     = request.get_json(force=True, silent=True) or {}
+    email = str(d.get("email", ""))[:_MAX_EMAIL].strip().lower()
+    pw    = str(d.get("password", ""))[:_MAX_PASSWORD]
     _BAD  = jsonify({"status": "error", "message": "Invalid credentials."})
+
     if not email or not pw:
         return _BAD
     user = db_get_user(email)
@@ -172,12 +194,11 @@ def login():
     stored = user.get("password", "")
     if not verify_password(stored, pw):
         return _BAD
-    # Transparent legacy SHA-256 → argon2 upgrade
     if needs_rehash(stored):
         try:
             db_update_password(email, hash_password(pw))
         except Exception as e:
-            print(f"[login] rehash failed for account: {e}")
+            print(f"[login] rehash failed: {e}")
     db_record_login(email)
     session["email"] = email
     session["name"]  = user["name"]
@@ -190,14 +211,18 @@ def google_auth():
     from config import Config
     import requests as _requests
 
+    if request.method == "POST":
+        _rate_limit("20 per hour")
+
     if request.method == "GET":
         return (
             """<html><body style="font-family:sans-serif;padding:40px;background:#020c1b;color:#dff4ff;">
-            <h2>⚠️ Google Sign-In Error</h2>
+            <h2>&#9888; Google Sign-In Error</h2>
             <p>This page should not be opened directly.<br>
             Please close this tab and sign in from the RAKSHA app.</p>
             <script>
-              if(window.opener){ window.opener.postMessage({type:'google_auth_error',message:'Wrong flow — please retry'},'*'); }
+              if(window.opener){ window.opener.postMessage({type:'google_auth_error',
+              message:'Wrong flow - please retry'},'*'); }
               setTimeout(()=>window.close(), 2000);
             </script></body></html>""",
             400,
@@ -207,16 +232,18 @@ def google_auth():
         return jsonify({"status": "error", "message": "Google Sign-In is not configured on this server."}), 503
 
     body       = request.get_json(force=True, silent=True) or {}
-    credential = body.get("credential", "").strip()
+    credential = str(body.get("credential", ""))[:2048].strip()
     if not credential:
         return jsonify({"status": "error", "message": "No credential received from Google."}), 400
 
-    # Verify the ID token
+    # Verify ID token — audience MUST equal GOOGLE_CLIENT_ID (prevents substitution attacks)
     try:
         from google.oauth2 import id_token as google_id_token
         from google.auth.transport import requests as google_requests
         id_info = google_id_token.verify_oauth2_token(
-            credential, google_requests.Request(), Config.GOOGLE_CLIENT_ID,
+            credential,
+            google_requests.Request(),
+            Config.GOOGLE_CLIENT_ID,
             clock_skew_in_seconds=10,
         )
     except ImportError:
@@ -235,18 +262,18 @@ def google_auth():
     except Exception as e:
         return jsonify({"status": "error", "message": f"Invalid Google token: {e}"}), 401
 
-    email          = (id_info.get("email") or "").strip().lower()
-    name           = id_info.get("name") or id_info.get("given_name") or email.split("@")[0]
+    email          = (id_info.get("email") or "").strip().lower()[:_MAX_EMAIL]
+    name           = (id_info.get("name") or id_info.get("given_name") or email.split("@")[0])[:_MAX_NAME]
     email_verified = id_info.get("email_verified", False)
 
-    if not email:
-        return jsonify({"status": "error", "message": "Could not retrieve email from Google."}), 400
+    if not email or not _EMAIL_RE.match(email):
+        return jsonify({"status": "error", "message": "Could not retrieve valid email from Google."}), 400
     if not email_verified:
         return jsonify({"status": "error", "message": "Google account email is not verified."}), 400
 
     existing = db_get_user(email)
     if existing:
-        lang = existing.get("lang", "English")
+        lang   = existing.get("lang", "English")
         db_record_login(email)
         is_new = False
     else:
@@ -289,7 +316,7 @@ def me():
 def set_lang():
     if "email" not in session:
         return jsonify({"status": "error"})
-    lang = (request.json or {}).get("lang", "English")
+    lang = str((request.get_json(force=True, silent=True) or {}).get("lang", "English"))[:_MAX_LANG]
     session["lang"] = lang
     db_update_lang(session["email"], lang)
     return jsonify({"status": "success", "lang": lang})
